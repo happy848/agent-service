@@ -1,346 +1,133 @@
-import json
+"""
+Browser client for WhatsApp Web screenshot capture using Playwright.
+"""
+
+import asyncio
 import os
-from collections.abc import AsyncGenerator, Generator
-from typing import Any
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
-import httpx
-
-from schema import (
-    ChatHistory,
-    ChatHistoryInput,
-    ChatMessage,
-    Feedback,
-    ServiceMetadata,
-    StreamInput,
-    UserInput,
-)
+from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 
-class AgentClientError(Exception):
-    pass
-
-
-class AgentClient:
-    """Client for interacting with the agent service."""
-
-    def __init__(
-        self,
-        base_url: str = "http://0.0.0.0",
-        agent: str = None,
-        timeout: float | None = None,
-        get_info: bool = True,
-    ) -> None:
-        """
-        Initialize the client.
-
-        Args:
-            base_url (str): The base URL of the agent service.
-            agent (str): The name of the default agent to use.
-            timeout (float, optional): The timeout for requests.
-            get_info (bool, optional): Whether to fetch agent information on init.
-                Default: True
-        """
-        self.base_url = base_url
-        self.auth_secret = os.getenv("AUTH_SECRET")
-        self.timeout = timeout
-        self.info: ServiceMetadata | None = None
-        self.agent: str | None = None
-        if get_info:
-            self.retrieve_info()
-        if agent:
-            self.update_agent(agent)
-
-    @property
-    def _headers(self) -> dict[str, str]:
-        headers = {}
-        if self.auth_secret:
-            headers["Authorization"] = f"Bearer {self.auth_secret}"
-        return headers
-
-    def retrieve_info(self) -> None:
+class WhatsAppBrowserClient:
+    """Browser client for capturing WhatsApp Web screenshots."""
+    
+    def __init__(self):
+        self.browser: Optional[Browser] = None
+        self.context: Optional[BrowserContext] = None
+        self.page: Optional[Page] = None
+        self.playwright = None
+        
+    async def __aenter__(self):
+        """Async context manager entry."""
+        await self.start()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
+        
+    async def start(self):
+        """Start the browser and navigate to WhatsApp Web."""
+        self.playwright = await async_playwright().start()
+        
+        # Launch browser with persistent context to maintain login
+        self.browser = await self.playwright.chromium.launch(
+            headless=False,  # Keep visible for QR code scanning
+            args=['--no-sandbox', '--disable-dev-shm-usage']
+        )
+        
+        self.context = await self.browser.new_context(
+            viewport={'width': 1280, 'height': 720},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        )
+        
+        self.page = await self.context.new_page()
+        
+        # Navigate to WhatsApp Web
+        await self.page.goto('https://web.whatsapp.com/')
+        
+        # Wait for the page to load
+        await self.page.wait_for_load_state('networkidle')
+        
+        print("Browser started and navigated to WhatsApp Web")
+        print("Please scan the QR code if not already logged in...")
+        
+    async def close(self):
+        """Close the browser and cleanup."""
+        if self.context:
+            await self.context.close()
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+            
+    async def take_screenshot(self) -> str:
+        """Take a screenshot and save it with timestamp."""
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+            
+        # Ensure images directory exists
+        images_dir = Path("images")
+        images_dir.mkdir(exist_ok=True)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        filename = f"whatsapp_screenshot_{timestamp}.png"
+        filepath = images_dir / filename
+        
+        # Take screenshot
+        await self.page.screenshot(path=str(filepath), full_page=True)
+        
+        print(f"Screenshot saved: {filepath}")
+        return str(filepath)
+        
+    async def start_continuous_screenshots(self, interval_seconds: int = 10):
+        """Start taking screenshots every specified interval."""
+        print(f"Starting continuous screenshots every {interval_seconds} seconds...")
+        print("Press Ctrl+C to stop")
+        
         try:
-            response = httpx.get(
-                f"{self.base_url}/info",
-                headers=self._headers,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as e:
-            raise AgentClientError(f"Error getting service info: {e}")
+            while True:
+                await self.take_screenshot()
+                await asyncio.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            print("\nStopping continuous screenshots...")
+        except Exception as e:
+            print(f"Error during screenshot capture: {e}")
+            
 
-        self.info: ServiceMetadata = ServiceMetadata.model_validate(response.json())
-        if not self.agent or self.agent not in [a.key for a in self.info.agents]:
-            self.agent = self.info.default_agent
-
-    def update_agent(self, agent: str, verify: bool = True) -> None:
-        if verify:
-            if not self.info:
-                self.retrieve_info()
-            agent_keys = [a.key for a in self.info.agents]
-            if agent not in agent_keys:
-                raise AgentClientError(
-                    f"Agent {agent} not found in available agents: {', '.join(agent_keys)}"
-                )
-        self.agent = agent
-
-    async def ainvoke(
-        self,
-        message: str,
-        model: str | None = None,
-        thread_id: str | None = None,
-        agent_config: dict[str, Any] | None = None,
-    ) -> ChatMessage:
-        """
-        Invoke the agent asynchronously. Only the final message is returned.
-
-        Args:
-            message (str): The message to send to the agent
-            model (str, optional): LLM model to use for the agent
-            thread_id (str, optional): Thread ID for continuing a conversation
-            agent_config (dict[str, Any], optional): Additional configuration to pass through to the agent
-
-        Returns:
-            AnyMessage: The response from the agent
-        """
-        if not self.agent:
-            raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
-        request = UserInput(message=message)
-        if thread_id:
-            request.thread_id = thread_id
-        if model:
-            request.model = model
-        if agent_config:
-            request.agent_config = agent_config
-        async with httpx.AsyncClient() as client:
+async def screenshot_whatsapp(interval_seconds: int = 10, duration_minutes: Optional[int] = None):
+    """
+    External function to capture WhatsApp Web screenshots.
+    
+    Args:
+        interval_seconds: Interval between screenshots in seconds (default: 10)
+        duration_minutes: Total duration to run in minutes. If None, runs indefinitely
+    """
+    async with WhatsAppBrowserClient() as client:
+        if duration_minutes:
+            # Run for specified duration
+            end_time = asyncio.get_event_loop().time() + (duration_minutes * 60)
+            screenshot_count = 0
+            
             try:
-                response = await client.post(
-                    f"{self.base_url}/{self.agent}/invoke",
-                    json=request.model_dump(),
-                    headers=self._headers,
-                    timeout=self.timeout,
-                )
-                response.raise_for_status()
-            except httpx.HTTPError as e:
-                raise AgentClientError(f"Error: {e}")
+                while asyncio.get_event_loop().time() < end_time:
+                    await client.take_screenshot()
+                    screenshot_count += 1
+                    await asyncio.sleep(interval_seconds)
+                    
+                print(f"Completed {screenshot_count} screenshots in {duration_minutes} minutes")
+                
+            except KeyboardInterrupt:
+                print(f"\nStopped early. Captured {screenshot_count} screenshots")
+        else:
+            # Run indefinitely
+            await client.start_continuous_screenshots(interval_seconds)
 
-        return ChatMessage.model_validate(response.json())
 
-    def invoke(
-        self,
-        message: str,
-        model: str | None = None,
-        thread_id: str | None = None,
-        agent_config: dict[str, Any] | None = None,
-    ) -> ChatMessage:
-        """
-        Invoke the agent synchronously. Only the final message is returned.
-
-        Args:
-            message (str): The message to send to the agent
-            model (str, optional): LLM model to use for the agent
-            thread_id (str, optional): Thread ID for continuing a conversation
-            agent_config (dict[str, Any], optional): Additional configuration to pass through to the agent
-
-        Returns:
-            ChatMessage: The response from the agent
-        """
-        if not self.agent:
-            raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
-        request = UserInput(message=message)
-        if thread_id:
-            request.thread_id = thread_id
-        if model:
-            request.model = model
-        if agent_config:
-            request.agent_config = agent_config
-        try:
-            response = httpx.post(
-                f"{self.base_url}/{self.agent}/invoke",
-                json=request.model_dump(),
-                headers=self._headers,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as e:
-            raise AgentClientError(f"Error: {e}")
-
-        return ChatMessage.model_validate(response.json())
-
-    def _parse_stream_line(self, line: str) -> ChatMessage | str | None:
-        line = line.strip()
-        if line.startswith("data: "):
-            data = line[6:]
-            if data == "[DONE]":
-                return None
-            try:
-                parsed = json.loads(data)
-            except Exception as e:
-                raise Exception(f"Error JSON parsing message from server: {e}")
-            match parsed["type"]:
-                case "message":
-                    # Convert the JSON formatted message to an AnyMessage
-                    try:
-                        return ChatMessage.model_validate(parsed["content"])
-                    except Exception as e:
-                        raise Exception(f"Server returned invalid message: {e}")
-                case "token":
-                    # Yield the str token directly
-                    return parsed["content"]
-                case "error":
-                    raise Exception(parsed["content"])
-        return None
-
-    def stream(
-        self,
-        message: str,
-        model: str | None = None,
-        thread_id: str | None = None,
-        agent_config: dict[str, Any] | None = None,
-        stream_tokens: bool = True,
-    ) -> Generator[ChatMessage | str, None, None]:
-        """
-        Stream the agent's response synchronously.
-
-        Each intermediate message of the agent process is yielded as a ChatMessage.
-        If stream_tokens is True (the default value), the response will also yield
-        content tokens from streaming models as they are generated.
-
-        Args:
-            message (str): The message to send to the agent
-            model (str, optional): LLM model to use for the agent
-            thread_id (str, optional): Thread ID for continuing a conversation
-            agent_config (dict[str, Any], optional): Additional configuration to pass through to the agent
-            stream_tokens (bool, optional): Stream tokens as they are generated
-                Default: True
-
-        Returns:
-            Generator[ChatMessage | str, None, None]: The response from the agent
-        """
-        if not self.agent:
-            raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
-        request = StreamInput(message=message, stream_tokens=stream_tokens)
-        if thread_id:
-            request.thread_id = thread_id
-        if model:
-            request.model = model
-        if agent_config:
-            request.agent_config = agent_config
-        try:
-            with httpx.stream(
-                "POST",
-                f"{self.base_url}/{self.agent}/stream",
-                json=request.model_dump(),
-                headers=self._headers,
-                timeout=self.timeout,
-            ) as response:
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    if line.strip():
-                        parsed = self._parse_stream_line(line)
-                        if parsed is None:
-                            break
-                        yield parsed
-        except httpx.HTTPError as e:
-            raise AgentClientError(f"Error: {e}")
-
-    async def astream(
-        self,
-        message: str,
-        model: str | None = None,
-        thread_id: str | None = None,
-        agent_config: dict[str, Any] | None = None,
-        stream_tokens: bool = True,
-    ) -> AsyncGenerator[ChatMessage | str, None]:
-        """
-        Stream the agent's response asynchronously.
-
-        Each intermediate message of the agent process is yielded as an AnyMessage.
-        If stream_tokens is True (the default value), the response will also yield
-        content tokens from streaming modelsas they are generated.
-
-        Args:
-            message (str): The message to send to the agent
-            model (str, optional): LLM model to use for the agent
-            thread_id (str, optional): Thread ID for continuing a conversation
-            agent_config (dict[str, Any], optional): Additional configuration to pass through to the agent
-            stream_tokens (bool, optional): Stream tokens as they are generated
-                Default: True
-
-        Returns:
-            AsyncGenerator[ChatMessage | str, None]: The response from the agent
-        """
-        if not self.agent:
-            raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
-        request = StreamInput(message=message, stream_tokens=stream_tokens)
-        if thread_id:
-            request.thread_id = thread_id
-        if model:
-            request.model = model
-        if agent_config:
-            request.agent_config = agent_config
-        async with httpx.AsyncClient() as client:
-            try:
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url}/{self.agent}/stream",
-                    json=request.model_dump(),
-                    headers=self._headers,
-                    timeout=self.timeout,
-                ) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if line.strip():
-                            parsed = self._parse_stream_line(line)
-                            if parsed is None:
-                                break
-                            yield parsed
-            except httpx.HTTPError as e:
-                raise AgentClientError(f"Error: {e}")
-
-    async def acreate_feedback(
-        self, run_id: str, key: str, score: float, kwargs: dict[str, Any] = {}
-    ) -> None:
-        """
-        Create a feedback record for a run.
-
-        This is a simple wrapper for the LangSmith create_feedback API, so the
-        credentials can be stored and managed in the service rather than the client.
-        See: https://api.smith.langchain.com/redoc#tag/feedback/operation/create_feedback_api_v1_feedback_post
-        """
-        request = Feedback(run_id=run_id, key=key, score=score, kwargs=kwargs)
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    f"{self.base_url}/feedback",
-                    json=request.model_dump(),
-                    headers=self._headers,
-                    timeout=self.timeout,
-                )
-                response.raise_for_status()
-                response.json()
-            except httpx.HTTPError as e:
-                raise AgentClientError(f"Error: {e}")
-
-    def get_history(
-        self,
-        thread_id: str,
-    ) -> ChatHistory:
-        """
-        Get chat history.
-
-        Args:
-            thread_id (str, optional): Thread ID for identifying a conversation
-        """
-        request = ChatHistoryInput(thread_id=thread_id)
-        try:
-            response = httpx.post(
-                f"{self.base_url}/history",
-                json=request.model_dump(),
-                headers=self._headers,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as e:
-            raise AgentClientError(f"Error: {e}")
-
-        return ChatHistory.model_validate(response.json())
+if __name__ == "__main__":
+    # Example usage
+    asyncio.run(screenshot_whatsapp(interval_seconds=10, duration_minutes=5))

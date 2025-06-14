@@ -1,0 +1,28 @@
+FROM python:3.12.3-slim
+
+WORKDIR /app
+
+# Install system dependencies for Playwright
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV UV_PROJECT_ENVIRONMENT="/usr/local/"
+ENV UV_COMPILE_BYTECODE=1
+
+# Copy dependency files
+COPY pyproject.toml .
+COPY uv.lock .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir uv
+RUN uv sync --frozen --no-install-project --no-dev
+
+# Install Playwright and browsers
+RUN pip install playwright
+RUN playwright install --with-deps chromium
+
+# Clean up
+RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* 

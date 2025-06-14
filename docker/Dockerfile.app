@@ -1,4 +1,5 @@
-FROM python:3.12.3-slim
+# FROM python:3.12.3-slim
+FROM agent-service-base:latest
 
 WORKDIR /app
 

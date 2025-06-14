@@ -168,6 +168,39 @@ rebuild() {
     log_success "服务重建完成"
 }
 
+# 测试服务接口
+test_service() {
+    log_info "测试服务接口..."
+    
+    # 检查服务是否运行
+    if ! docker compose ps | grep -q "Up"; then
+        log_error "服务未运行，请先启动服务: $0 start"
+        exit 1
+    fi
+    
+    # 测试 /test 接口
+    log_info "请求 http://localhost:8080/test 接口..."
+    
+    if response=$(curl -s -w "\n%{http_code}" http://localhost:8080/test 2>/dev/null); then
+        http_code=${response##*$'\n'}
+        response_body=${response%$'\n'*}
+        
+        if [[ "$http_code" == "200" ]]; then
+            log_success "测试接口响应成功 (HTTP $http_code)"
+            echo "响应内容:"
+            echo "$response_body"
+        else
+            log_warning "测试接口响应异常 (HTTP $http_code)"
+            echo "响应内容:"
+            echo "$response_body"
+        fi
+    else
+        log_error "无法连接到测试接口"
+        log_info "请确认服务是否正常运行: $0 status"
+        exit 1
+    fi
+}
+
 # 显示帮助
 show_help() {
     cat << EOF
@@ -183,6 +216,7 @@ Docker AI Agent Service 启动脚本
   status          查看服务状态
   logs            查看服务日志
   rebuild         完全重建服务
+  test            测试服务接口（请求 8080/test）
   help            显示帮助信息
 
 快速开始:
@@ -233,6 +267,9 @@ main() {
         rebuild)
             setup_env
             rebuild
+            ;;
+        test)
+            test_service
             ;;
         help|--help|-h)
             show_help
