@@ -747,18 +747,16 @@ class WhatsAppBrowserClient:
                 p_element = await input_element.query_selector('p')
             
             if p_element:
-                # Type the message character by character to simulate human typing
-                await p_element.click()
+                # Advanced anti-detection input method
+                await self._send_message_with_anti_detection(p_element, message)
                 
-                # Type each character with random delay to simulate natural human typing
-                for char in message:
-                    await p_element.type(char, delay=random.randint(30, 120))
+                logger.info(f"Sent message: {message}")
                 
-                logger.info(f"Typed message: {message}")
-                
-                await self.page.wait_for_timeout(random.randint(200, 500))
-                await self.page.keyboard.press('Enter')
-                await self.page.wait_for_timeout(1000)
+                # Wait for message to be sent
+                await self.page.wait_for_timeout(random.randint(2000, 3000))
+
+                # Save conversation HTML for debugging
+                await self._save_conversation_html_to_log()
 
                 result["success"] = True
                 logger.info(f"Successfully sent message: {message}")
@@ -774,6 +772,192 @@ class WhatsAppBrowserClient:
         
         return result
     
+    async def _send_message_with_anti_detection(self, p_element, message: str):
+        """
+        Advanced message sending method to avoid automation detection.
+        Uses multiple strategies to simulate human behavior.
+        """
+        try:
+            # Strategy 1: Focus and clear with multiple methods
+            await p_element.click()
+            await self.page.wait_for_timeout(random.randint(100, 300))
+            
+            # Simulate human-like clearing behavior
+            # await self.page.keyboard.press('Control+a')
+            # await self.page.wait_for_timeout(random.randint(50, 150))
+            # await self.page.keyboard.press('Delete')
+            # await self.page.wait_for_timeout(random.randint(100, 200))
+            
+            # Strategy 2: Use innerHTML injection with random pauses
+            # Split message into smaller chunks to simulate natural typing
+            chunk_size = random.randint(3, 8)
+            message_chunks = [message[i:i+chunk_size] for i in range(0, len(message), chunk_size)]
+            
+            accumulated_text = ""
+            for i, chunk in enumerate(message_chunks):
+                accumulated_text += chunk
+                
+                # Set content using innerHTML to avoid character-by-character detection
+                await p_element.evaluate(f'''
+                    element => {{
+                        element.innerHTML = `{accumulated_text}`;
+                        // Trigger input events to simulate real typing
+                        element.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        element.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                ''')
+                
+                # Random pause between chunks to simulate thinking/typing rhythm
+                if i < len(message_chunks) - 1:  # Don't pause after last chunk
+                    pause_time = random.randint(100, 500)
+                    await self.page.wait_for_timeout(pause_time)
+            
+            # Strategy 3: Random additional human-like behaviors
+            if random.random() < 0.3:  # 30% chance to simulate backspace and retype
+                await self.page.keyboard.press('Backspace')
+                await self.page.wait_for_timeout(random.randint(50, 150))
+                await p_element.type(message[-1])  # Retype last character
+                await self.page.wait_for_timeout(random.randint(100, 200))
+            
+            # Strategy 4: Multiple ways to send message
+            send_method = random.choice(['enter', 'click_send', 'shift_enter'])
+            send_method = 'enter'
+            
+            if send_method == 'enter':
+                # Standard Enter press with random timing
+                await self.page.wait_for_timeout(random.randint(200, 800))
+                await self.page.keyboard.press('Enter')
+                
+            elif send_method == 'click_send':
+                # Try to click send button instead of Enter
+                try:
+                    send_button = await self.page.wait_for_selector(
+                        '[aria-label="发送"], [aria-label="Send"], [data-testid="send"], button[aria-label*="send" i]', 
+                        timeout=2000
+                    )
+                    if send_button:
+                        await send_button.click()
+                    else:
+                        # Fallback to Enter
+                        await self.page.keyboard.press('Enter')
+                except:
+                    # Fallback to Enter
+                    await self.page.keyboard.press('Enter')
+                    
+            else:  # shift_enter fallback
+                # Sometimes people use Shift+Enter then Enter
+                if random.random() < 0.5:
+                    await self.page.keyboard.press('Shift+Enter')
+                    await self.page.wait_for_timeout(random.randint(100, 300))
+                await self.page.keyboard.press('Enter')
+            
+            # Strategy 5: Post-send human behavior simulation
+            post_send_behavior = random.choice(['scroll', 'click_away', 'wait'])
+            
+            if post_send_behavior == 'scroll':
+                # Sometimes people scroll after sending
+                await self.page.mouse.wheel(0, random.randint(-100, 100))
+                await self.page.wait_for_timeout(random.randint(200, 500))
+                
+            elif post_send_behavior == 'click_away':
+                # Click somewhere else then back to input
+                try:
+                    chat_area = await self.page.query_selector('#main')
+                    if chat_area:
+                        box = await chat_area.bounding_box()
+                        if box:
+                            await self.page.mouse.click(
+                                box['x'] + box['width'] * 0.5,
+                                box['y'] + box['height'] * 0.3
+                            )
+                            await self.page.wait_for_timeout(random.randint(100, 300))
+                except:
+                    pass
+            
+            # Always end with a small random wait
+            await self.page.wait_for_timeout(random.randint(300, 700))
+            
+        except Exception as e:
+            logger.error(f"Error in anti-detection send: {e}")
+            # Fallback to simple Enter press
+            await self.page.keyboard.press('Enter')
+    
+    async def _save_conversation_html_to_log(self):
+        """
+        Save conversation list HTML content to log file for debugging.
+        """
+        try:
+            # Ensure logs directory exists
+            logs_dir = Path("/app/docker/logs")
+            logs_dir.mkdir(exist_ok=True)
+            # Generate filename with timestamp
+            utc_plus_8 = timezone(timedelta(hours=8))
+            timestamp = datetime.now(utc_plus_8).strftime("%Y-%m-%d_%H-%M-%S")
+
+            # Get current chat HTML for additional context
+            current_chat_html = ""
+            try:
+                main_chat = await self.page.query_selector('#main')
+                if main_chat:
+                    current_chat_html = await main_chat.inner_html()
+                    logger.debug("Got current chat HTML")
+            except Exception as e:
+                logger.warning(f"Could not get current chat HTML: {e}")
+                current_chat_html = f"<!-- Error getting current chat: {e} -->"
+            
+            # Get page URL
+            page_url = self.page.url
+            
+            # Create HTML debug file
+            html_content = current_chat_html
+            
+            # Save HTML file
+            html_filename = f"whatsapp_debug_{timestamp}.html"
+            html_filepath = logs_dir / html_filename
+            
+            with open(html_filepath, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            logger.info(f"Saved conversation HTML debug file: {html_filepath}")
+            
+            await self._cleanup_old_debug_files(logs_dir)
+            
+        except Exception as e:
+            logger.error(f"Error saving conversation HTML to log: {e}")
+    
+    async def _cleanup_old_debug_files(self, logs_dir: Path):
+        """Clean up debug HTML files older than 1 hour."""
+        try:
+            current_time = datetime.now()
+            cutoff_time = current_time.timestamp() - 3600  # 1 hour = 3600 seconds
+            
+            deleted_count = 0
+            
+            # Find all debug HTML files
+            debug_patterns = ["whatsapp_debug_*.html", "conversation_list_raw_*.html"]
+            
+            for pattern in debug_patterns:
+                debug_files = list(logs_dir.glob(pattern))
+                
+                for file_path in debug_files:
+                    try:
+                        file_stat = file_path.stat()
+                        file_creation_time = file_stat.st_mtime
+                        
+                        if file_creation_time < cutoff_time:
+                            file_path.unlink()
+                            deleted_count += 1
+                            logger.debug(f"Deleted old debug file: {file_path.name}")
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to delete old debug file {file_path.name}: {e}")
+                        
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} old debug file(s)")
+                
+        except Exception as e:
+            logger.error(f"Error during debug file cleanup: {e}")
+
 
 class WhatsAppMonitor:
     """WhatsApp Web monitoring class that supports timed execution of multiple tasks"""
