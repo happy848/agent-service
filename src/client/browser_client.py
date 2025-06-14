@@ -70,7 +70,7 @@ class WhatsAppBrowserClient:
             raise RuntimeError("Browser not started. Call start() first.")
             
         # Ensure images directory exists
-        images_dir = Path("images")
+        images_dir = Path("/app/docker/logs")
         images_dir.mkdir(exist_ok=True)
         
         # Generate filename with timestamp

@@ -1,6 +1,7 @@
 import json
 import logging
 import warnings
+import asyncio
 from asyncio import CancelledError
 from builtins import GeneratorExit
 from collections.abc import AsyncGenerator
@@ -36,6 +37,9 @@ from service.utils import (
     langchain_to_chat_message,
     remove_tool_calls,
 )
+
+from client import screenshot_whatsapp
+
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
@@ -101,7 +105,8 @@ async def _handle_input(
     configurable = {"thread_id": thread_id, "model": user_input.model}
 
     if user_input.agent_config:
-        if overlap := configurable.keys() & user_input.agent_config.keys():
+        overlap = configurable.keys() & user_input.agent_config.keys()
+        if overlap:
             raise HTTPException(
                 status_code=422,
                 detail=f"agent_config contains reserved keys: {overlap}",
@@ -356,9 +361,21 @@ async def health_check():
 
 @app.get("/test")
 async def test():
-    """Test endpoint."""
-    return {"status": "test"}
-
+    """Main function demonstrating different usage patterns."""
+    logger.info("=== WhatsApp Web Screenshot Demo ===")
+    # Option 1: Use the simple function (runs for 2 minutes as demo)
+    logger.info("Option 1: Using screenshot_whatsapp function")
+    logger.info("This will run for 2 minutes, taking screenshots every 10 seconds")
+    logger.info("Press Ctrl+C to stop early")
+    
+    try:
+        await screenshot_whatsapp(interval_seconds=10, duration_minutes=2)
+    except KeyboardInterrupt:
+        logger.info("Demo stopped by user")
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+    
+    logger.info("\nDemo completed!")
 
 
 app.include_router(router)

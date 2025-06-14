@@ -5,6 +5,7 @@ WORKDIR /app
 
 # Copy application code
 COPY src/agents/ ./agents/
+COPY src/client/ ./client/
 COPY src/core/ ./core/
 COPY src/memory/ ./memory/
 COPY src/schema/ ./schema/
