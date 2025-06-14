@@ -16,6 +16,9 @@ from client.browser_client import BrowserManager
 
 from playwright.async_api import Page
 
+from client.whatsapp_messages_handler import get_whatsapp_message_handler
+
+
 # Configure logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -85,6 +88,8 @@ class WhatsAppBrowserClient:
         
         # Unread filter state tracking
         self._unread_filter_active = False
+        
+        self.whatsapp_message_handler = get_whatsapp_message_handler(self)
         
     async def __aenter__(self):
         """Async context manager entry."""
@@ -169,6 +174,25 @@ class WhatsAppBrowserClient:
     def get_filter_state(self) -> bool:
         """Get current tracked filter state."""
         return self._unread_filter_active
+    
+    
+    async def check_new_messages(self) -> List[Dict[str, Any]]:
+        """Check new messages"""
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+        
+        res = await self.click_unread_filter_and_process()
+        
+        if res['unread_messages_found']:
+            reply = await self.whatsapp_message_handler.generate_ai_customer_reply(res['chat_messages'])
+            if reply['success']:
+                await self.send_message(reply['ai_reply_message'])
+
+        logger.info(f"check_new_messages: {res}")
+
+        return res
+    
+    
             
     async def take_screenshot(self, filename_prefix: str = "wa") -> str:
         """Take a screenshot and save it with timestamp."""
@@ -274,17 +298,6 @@ class WhatsAppBrowserClient:
                 
         except Exception as e:
             logger.error(f"Error during screenshot cleanup: {e}")
-    
-    async def check_new_messages(self) -> List[Dict[str, Any]]:
-        """Check new messages"""
-        if not self.page:
-            raise RuntimeError("Browser not started. Call start() first.")
-        
-        res = await self.click_unread_filter_and_process()
-
-        logger.info(f"check_new_messages: {res}")
-
-        return res
     
     async def click_unread_filter_and_process(self) -> Dict[str, Any]:
         """
@@ -746,7 +759,7 @@ class WhatsAppBrowserClient:
                 await self.page.wait_for_timeout(random.randint(200, 500))
                 await self.page.keyboard.press('Enter')
                 await self.page.wait_for_timeout(1000)
-                
+
                 result["success"] = True
                 logger.info(f"Successfully sent message: {message}")
                 
