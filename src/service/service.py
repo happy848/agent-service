@@ -352,4 +352,13 @@ async def health_check():
     return {"status": "ok"}
 
 
+# curl -s http://localhost:8080/test
+
+@app.get("/test")
+async def test():
+    """Test endpoint."""
+    return {"status": "test"}
+
+
+
 app.include_router(router)

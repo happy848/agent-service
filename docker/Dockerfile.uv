@@ -1,0 +1,15 @@
+FROM python:3.12.3-slim
+
+WORKDIR /app
+
+ENV UV_PROJECT_ENVIRONMENT="/usr/local/"
+ENV UV_COMPILE_BYTECODE=1
+
+# 安装uv
+RUN pip install --no-cache-dir uv
+
+# 设置工作目录
+WORKDIR /app
+
+# 设置默认命令
+CMD ["bash"] 
