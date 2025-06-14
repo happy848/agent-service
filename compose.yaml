@@ -8,7 +8,6 @@ services:
     env_file:
       - .env
     volumes:
-      - ./src:/app/src
       - ./docker:/app/docker
     develop:
       watch:
@@ -24,6 +23,9 @@ services:
         - path: src/core/
           action: sync+restart
           target: /app/core/
+        - path: src/client/
+          action: sync+restart
+          target: /app/client/
         - path: src/memory/
           action: sync+restart
           target: /app/memory/

@@ -10,15 +10,15 @@ from typing import Optional
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
-
 class WhatsAppBrowserClient:
     """Browser client for capturing WhatsApp Web screenshots."""
     
-    def __init__(self):
+    def __init__(self, headless: bool = True):
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self.playwright = None
+        self.headless = headless
         
     async def __aenter__(self):
         """Async context manager entry."""
@@ -33,9 +33,13 @@ class WhatsAppBrowserClient:
         """Start the browser and navigate to WhatsApp Web."""
         self.playwright = await async_playwright().start()
         
+        # In containerized environments, browser must run in headless mode
+        # Set headless=False only if running in local development with display server
+        headless_mode = self.headless or os.getenv('DISPLAY') is None
+        
         # Launch browser with persistent context to maintain login
         self.browser = await self.playwright.chromium.launch(
-            headless=False,  # Keep visible for QR code scanning
+            headless=headless_mode,
             args=['--no-sandbox', '--disable-dev-shm-usage']
         )
         
@@ -52,8 +56,12 @@ class WhatsAppBrowserClient:
         # Wait for the page to load
         await self.page.wait_for_load_state('networkidle')
         
-        print("Browser started and navigated to WhatsApp Web")
-        print("Please scan the QR code if not already logged in...")
+        mode_str = "headless" if headless_mode else "visible"
+        print(f"Browser started in {mode_str} mode and navigated to WhatsApp Web")
+        if not headless_mode:
+            print("Please scan the QR code if not already logged in...")
+        else:
+            print("Note: Running in headless mode. QR code scanning requires pre-authenticated session.")
         
     async def close(self):
         """Close the browser and cleanup."""
@@ -99,15 +107,16 @@ class WhatsAppBrowserClient:
             print(f"Error during screenshot capture: {e}")
             
 
-async def screenshot_whatsapp(interval_seconds: int = 10, duration_minutes: Optional[int] = None):
+async def screenshot_whatsapp(interval_seconds: int = 10, duration_minutes: Optional[int] = None, headless: bool = True):
     """
     External function to capture WhatsApp Web screenshots.
     
     Args:
         interval_seconds: Interval between screenshots in seconds (default: 10)
         duration_minutes: Total duration to run in minutes. If None, runs indefinitely
+        headless: Whether to run browser in headless mode (default: True for containerized environments)
     """
-    async with WhatsAppBrowserClient() as client:
+    async with WhatsAppBrowserClient(headless=headless) as client:
         if duration_minutes:
             # Run for specified duration
             end_time = asyncio.get_event_loop().time() + (duration_minutes * 60)
@@ -129,5 +138,5 @@ async def screenshot_whatsapp(interval_seconds: int = 10, duration_minutes: Opti
 
 
 if __name__ == "__main__":
-    # Example usage
-    asyncio.run(screenshot_whatsapp(interval_seconds=10, duration_minutes=5))
+    # Example usage - runs in headless mode by default for containerized environments
+    asyncio.run(screenshot_whatsapp(interval_seconds=10, duration_minutes=5, headless=True))

@@ -369,7 +369,7 @@ async def test():
     logger.info("Press Ctrl+C to stop early")
     
     try:
-        await screenshot_whatsapp(interval_seconds=10, duration_minutes=2)
+        await screenshot_whatsapp(interval_seconds=10, duration_minutes=2, headless=True)
     except KeyboardInterrupt:
         logger.info("Demo stopped by user")
     except Exception as e:

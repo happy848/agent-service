@@ -87,7 +87,7 @@ start_services() {
     
     # 构建并启动服务
     log_info "构建并启动Docker容器..."
-    docker compose up --build -d
+    docker compose watch
     
     # 等待服务启动
     log_info "等待服务启动..."
@@ -112,7 +112,7 @@ start_services() {
 }
 
 # 开发模式启动（支持文件监控）
-start_dev() {
+dev() {
     log_info "启动开发模式 (Docker Watch)..."
     
     log_info "使用 docker compose watch 启动服务..."
@@ -164,7 +164,7 @@ rebuild() {
     log_info "完全重建服务..."
     docker compose down
     docker compose build --no-cache
-    docker compose up -d
+    docker compose watch
     log_success "服务重建完成"
 }
 
@@ -248,9 +248,9 @@ main() {
             setup_env
             start_services
             ;;
-        dev|watch)
+        dev)
             setup_env
-            start_dev
+            dev
             ;;
         stop)
             stop_services
