@@ -174,3 +174,4 @@ cython_debug/
 
 .specstory/
 docker/logs/*
+docker/data/*

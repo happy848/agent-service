@@ -38,9 +38,6 @@ from service.utils import (
     remove_tool_calls,
 )
 
-from client import screenshot_whatsapp
-
-
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
 
@@ -64,17 +61,34 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Configurable lifespan that initializes the appropriate database checkpointer based on settings.
     """
     try:
+        # 初始化数据库
         async with initialize_database() as saver:
             await saver.setup()
             agents = get_all_agent_info()
             for a in agents:
                 agent = get_agent(a.key)
                 agent.checkpointer = saver
+            
+            # 启动浏览器服务（常驻浏览器）
+            from service.browser_service import browser_service
+            await browser_service.start()
+            logger.info("浏览器服务已启动")
+            # 将浏览器服务绑定到应用实例，方便其他地方访问
+            app.state.browser_service = browser_service
+            
             yield
     except Exception as e:
         logger.error(f"Error during database initialization: {e}")
         raise
-
+    finally:
+        # 停止浏览器服务
+        try:
+            from service.browser_service import browser_service
+            await browser_service.stop()
+            logger.info("浏览器服务已停止")
+        except Exception as e:
+            logger.error(f"Error stopping browser service: {e}")
+            
 
 app = FastAPI(lifespan=lifespan)
 router = APIRouter(dependencies=[Depends(verify_bearer)])
@@ -358,24 +372,23 @@ async def health_check():
 
 
 # curl -s http://localhost:8080/test
-
-@app.get("/test")
-async def test():
-    """Main function demonstrating different usage patterns."""
-    logger.info("=== WhatsApp Web Screenshot Demo ===")
-    # Option 1: Use the simple function (runs for 2 minutes as demo)
-    logger.info("Option 1: Using screenshot_whatsapp function")
-    logger.info("This will run for 2 minutes, taking screenshots every 10 seconds")
-    logger.info("Press Ctrl+C to stop early")
+# @app.get("/test")
+# async def test():
+#     """Main function demonstrating different usage patterns."""
+#     logger.info("=== WhatsApp Web Screenshot Demo ===")
+#     # Option 1: Use the simple function (runs for 2 minutes as demo)
+#     logger.info("Option 1: Using screenshot_whatsapp function")
+#     logger.info("This will run for 2 minutes, taking screenshots every 10 seconds")
+#     logger.info("Press Ctrl+C to stop early")
     
-    try:
-        await screenshot_whatsapp(interval_seconds=10, duration_minutes=2, headless=True)
-    except KeyboardInterrupt:
-        logger.info("Demo stopped by user")
-    except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+#     try:
+#         await screenshot_whatsapp(interval_seconds=10, duration_minutes=2, headless=True)
+#     except KeyboardInterrupt:
+#         logger.info("Demo stopped by user")
+#     except Exception as e:
+#         logger.error(f"Error: {e}", exc_info=True)
     
-    logger.info("\nDemo completed!")
+#     logger.info("\nDemo completed!")
 
 
 app.include_router(router)
