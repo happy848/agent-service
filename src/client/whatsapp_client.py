@@ -5,6 +5,7 @@ Browser client for WhatsApp Web screenshot capture using Playwright.
 import asyncio
 import logging
 import os
+import random
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -77,6 +78,14 @@ class WhatsAppBrowserClient:
         self.monitor: Optional['WhatsAppMonitor'] = None
         self._monitoring_task: Optional[asyncio.Task] = None
         
+        # Continue button check tracking
+        self._continue_check_attempts = 0
+        self._max_continue_attempts = 3
+        self._skip_continue_check = False
+        
+        # Unread filter state tracking
+        self._unread_filter_active = False
+        
     async def __aenter__(self):
         """Async context manager entry."""
         await self.start()
@@ -99,6 +108,9 @@ class WhatsAppBrowserClient:
         
         # Wait for the page to load
         await self.page.wait_for_load_state('networkidle')
+        
+        # Reset filter state when page loads
+        self.reset_filter_state()
         
         logger.info("Browser started and navigated to WhatsApp Web")
         if not self.browser_manager.headless:
@@ -148,6 +160,15 @@ class WhatsAppBrowserClient:
         if self.monitor:
             return self.monitor.get_status()
         return {'is_running': False, 'monitor_exists': False}
+        
+    def reset_filter_state(self):
+        """Reset the unread filter state (useful when page is refreshed or reloaded)."""
+        self._unread_filter_active = False
+        logger.info("Reset unread filter state to inactive")
+        
+    def get_filter_state(self) -> bool:
+        """Get current tracked filter state."""
+        return self._unread_filter_active
             
     async def take_screenshot(self, filename_prefix: str = "wa") -> str:
         """Take a screenshot and save it with timestamp."""
@@ -173,6 +194,51 @@ class WhatsAppBrowserClient:
         await self._cleanup_old_screenshots(images_dir, filename_prefix)
         
         return str(filepath)
+    
+    async def _check_unread_filter_state(self, filter_element) -> bool:
+        """
+        Check if the unread filter button is currently active/pressed.
+        
+        Args:
+            filter_element: The unread filter button element
+            
+        Returns:
+            True if filter is active, False otherwise
+        """
+        try:
+            # Check common attributes that indicate active state
+            
+            # Method 1: Check aria-pressed attribute
+            aria_pressed = await filter_element.get_attribute('aria-pressed')
+            if aria_pressed == 'true':
+                logger.debug("Filter is active (aria-pressed=true)")
+                return True
+            
+            # Method 2: Check if element has active/selected class
+            class_list = await filter_element.get_attribute('class')
+            if class_list:
+                active_indicators = ['active', 'selected', 'pressed', 'checked', 'on']
+                for indicator in active_indicators:
+                    if indicator in class_list.lower():
+                        logger.debug(f"Filter is active (found '{indicator}' in class)")
+                        return True
+            
+            # Method 3: Check data attributes
+            data_active = await filter_element.get_attribute('data-active')
+            if data_active == 'true':
+                logger.debug("Filter is active (data-active=true)")
+                return True
+            
+            # Method 4: Check if button has different styling (background color, etc.)
+            # This would require getting computed styles, which is more complex
+            
+            logger.debug("Filter appears to be inactive")
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Error checking filter state: {e}")
+            # If we can't determine state, assume it's inactive and allow click
+            return False
     
     async def _cleanup_old_screenshots(self, images_dir: Path, filename_prefix: str = "wa"):
         """Clean up screenshot files older than 10 minutes."""
@@ -232,7 +298,7 @@ class WhatsAppBrowserClient:
             raise RuntimeError("Browser not started. Call start() first.")
         
         result = {
-            'unread_filter_clicked': False,
+            'unread_filter_already_active': self._unread_filter_active,
             'unread_messages_found': [],
             'first_chat_clicked': False,
             'chat_messages': [],
@@ -240,52 +306,80 @@ class WhatsAppBrowserClient:
         }
         
         try:
-            # Step 0: Check and click continue button if present
-            logger.info("Checking for continue button...")
-            try:
-                # Look for continue button with various possible selectors (case insensitive)
-                continue_selectors = [
-                    'button:has-text("Continue")',
-                    'button:has-text("continue")',
-                    'button:has-text("CONTINUE")',
-                    'button:has-text("继续")',
-                    '[data-testid*="continue" i]',
-                    '.continue-button',
-                    'button[aria-label="Continue" i]',
-                    'button[aria-label="continue" i]',
-                    'button[aria-label="CONTINUE" i]',
-                    'button[aria-label="继续"]'
-                ]
-                
-                continue_button = None
-                for selector in continue_selectors:
-                    try:
-                        continue_button = await self.page.wait_for_selector(selector, timeout=2000)
-                        if continue_button:
-                            logger.info(f"Found continue button with selector: {selector}")
-                            break
-                    except:
-                        continue
-                
-                if continue_button:
-                    await continue_button.click()
-                    await self.page.wait_for_timeout(1000)  # Wait for page to process
-                    logger.info("Clicked continue button")
-                else:
-                    logger.info("No continue button found, proceeding...")
+            # Step 0: Check and click continue button if present (max 3 attempts)
+            if not self._skip_continue_check and self._continue_check_attempts < self._max_continue_attempts:
+                logger.info(f"Checking for continue button... (attempt {self._continue_check_attempts + 1}/{self._max_continue_attempts})")
+                try:
+                    # Look for continue button with various possible selectors (case insensitive)
+                    continue_selectors = [
+                        'button:has-text("Continue")',
+                        'button:has-text("continue")',
+                        'button:has-text("CONTINUE")',
+                        'button:has-text("继续")',
+                        '[data-testid*="continue" i]',
+                        '.continue-button',
+                        'button[aria-label="Continue" i]',
+                        'button[aria-label="continue" i]',
+                        'button[aria-label="CONTINUE" i]',
+                        'button[aria-label="继续"]'
+                    ]
                     
-            except Exception as e:
-                logger.warning(f"Error checking for continue button: {e}")
+                    continue_button = None
+                    for selector in continue_selectors:
+                        try:
+                            continue_button = await self.page.wait_for_selector(selector, timeout=2000)
+                            if continue_button:
+                                logger.info(f"Found continue button with selector: {selector}")
+                                break
+                        except:
+                            continue
+                    
+                    self._continue_check_attempts += 1
+                    
+                    if continue_button:
+                        await continue_button.click()
+                        await self.page.wait_for_timeout(1000)  # Wait for page to process
+                        logger.info("Clicked continue button")
+                        # Reset attempts counter since we found and clicked the button
+                        self._continue_check_attempts = 0
+                    else:
+                        logger.info(f"No continue button found on attempt {self._continue_check_attempts}")
+                        # If we've reached max attempts, skip future checks
+                        if self._continue_check_attempts >= self._max_continue_attempts:
+                            self._skip_continue_check = True
+                            logger.info("Reached max continue button check attempts, will skip future checks")
+                        
+                except Exception as e:
+                    self._continue_check_attempts += 1
+                    logger.warning(f"Error checking for continue button (attempt {self._continue_check_attempts}): {e}")
+                    # If we've reached max attempts, skip future checks
+                    if self._continue_check_attempts >= self._max_continue_attempts:
+                        self._skip_continue_check = True
+                        logger.info("Reached max continue button check attempts due to errors, will skip future checks")
+            elif self._skip_continue_check:
+                logger.debug("Skipping continue button check (max attempts reached)")
+            else:
+                logger.debug("Continue button check disabled")
             
-            # Step 1: Click the unread filter button
-            logger.info("Looking for unread filter button...")
+                        # Step 1: Click the unread filter button (only if not already active)
+            logger.info("Checking unread filter button state...")
             unread_filter_button = await self.page.wait_for_selector('#unread-filter', timeout=1000)
             
             if unread_filter_button:
-                await unread_filter_button.click()
-                await self.page.wait_for_timeout(1000)  # Wait for filter to apply
-                result['unread_filter_clicked'] = True
-                logger.info("Clicked unread filter button")
+                # Check if filter is already active
+                current_filter_state = await self._check_unread_filter_state(unread_filter_button)
+                
+                if current_filter_state and self._unread_filter_active:
+                    logger.info("Unread filter is already active, skipping click")
+                    result['unread_filter_clicked'] = False
+                    result['unread_filter_already_active'] = True
+                else:
+                    await unread_filter_button.click()
+                    await self.page.wait_for_timeout(3000)  # Wait for filter to apply
+                    self._unread_filter_active = True
+                    result['unread_filter_clicked'] = True
+                    result['unread_filter_already_active'] = False
+                    logger.info("Clicked unread filter button and updated state")
             else:
                 logger.warning("Unread filter button not found, pls login first")
                 result['error'] = "Unread filter button not found, pls login first"
@@ -558,6 +652,115 @@ class WhatsAppBrowserClient:
             logger.warning(f"Error parsing message element: {e}")
             return None
 
+    async def send_message(self, message: str) -> Dict[str, Any]:
+        """
+        Send a message in the current WhatsApp chat by typing in the input field and pressing Enter.
+        Uses random delays between characters to simulate natural human typing.
+        
+        Args:
+            message: The message text to send
+            
+        Returns:
+            Dictionary with send result:
+            {
+                "success": bool,
+                "message": "sent message text",
+                "error": "error message if failed",
+                "timestamp": "ISO format timestamp"
+            }
+        """
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+        
+        if not message or not message.strip():
+            return {
+                "success": False,
+                "message": "",
+                "error": "Message cannot be empty",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        result = {
+            "success": False,
+            "message": message.strip(),
+            "error": None,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            # Wait for the chat to be loaded and input field to be available
+            await self.page.wait_for_selector('#main', timeout=5000)
+            
+            # Find the message input field using multiple possible selectors
+            input_selectors = [
+                '[aria-label="输入消息"]',
+                '[aria-label="Type a message"]',
+                '[contenteditable="true"][role="textbox"]',
+                '.lexical-rich-text-input [contenteditable="true"]',
+                'footer [contenteditable="true"]'
+            ]
+            
+            input_element = None
+            for selector in input_selectors:
+                try:
+                    input_element = await self.page.wait_for_selector(selector, timeout=2000)
+                    if input_element:
+                        logger.debug(f"Found input element with selector: {selector}")
+                        break
+                except:
+                    continue
+            
+            if not input_element:
+                result["error"] = "Message input field not found"
+                logger.error("Could not find message input field")
+                return result
+            
+            # Click on the input field to focus it
+            await input_element.click()
+            await self.page.wait_for_timeout(500)
+            
+            # Clear existing content in the input field
+            await input_element.evaluate('element => element.innerHTML = ""')
+            
+            # Find the paragraph element inside the input for typing
+            p_element = await input_element.query_selector('p')
+            if not p_element:
+                # If no p element exists, create one
+                await input_element.evaluate('''
+                    element => {
+                        element.innerHTML = '<p class="selectable-text copyable-text x15bjb6t x1n2onr6" style="text-indent: 0px; margin-top: 0px; margin-bottom: 0px;"></p>';
+                    }
+                ''')
+                p_element = await input_element.query_selector('p')
+            
+            if p_element:
+                # Type the message character by character to simulate human typing
+                await p_element.click()
+                
+                # Type each character with random delay to simulate natural human typing
+                for char in message:
+                    await p_element.type(char, delay=random.randint(30, 120))
+                
+                logger.info(f"Typed message: {message}")
+                
+                await self.page.wait_for_timeout(random.randint(200, 500))
+                await self.page.keyboard.press('Enter')
+                await self.page.wait_for_timeout(1000)
+                
+                result["success"] = True
+                logger.info(f"Successfully sent message: {message}")
+                
+            else:
+                result["error"] = "Could not find or create paragraph element in input field"
+                logger.error("Could not find paragraph element for typing")
+
+        except Exception as e:
+            error_msg = f"Error sending message: {e}"
+            result["error"] = error_msg
+            logger.error(error_msg)
+        
+        return result
+    
 
 class WhatsAppMonitor:
     """WhatsApp Web monitoring class that supports timed execution of multiple tasks"""
