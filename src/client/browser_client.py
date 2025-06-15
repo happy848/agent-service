@@ -2,19 +2,26 @@ import asyncio
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
+import json
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 class BrowserManager:
     """Browser manager for handling browser lifecycle and configuration."""
     
-    def __init__(self, headless: bool = True, user_data_dir: Optional[str] = None, profile_name: str = "default"):
+    def __init__(
+        self, 
+        headless: bool = True, 
+        user_data_dir: Optional[str] = None, 
+        profile_name: str = "default",
+    ):
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.playwright = None
         self.headless = headless
         self.profile_name = profile_name
+        self.connect_to_remote = connect_to_remote  # Format: "ws://host:port/devtools/browser/..."
         
         # Set up persistent user data directory
         if user_data_dir:
@@ -34,7 +41,7 @@ class BrowserManager:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         await self.close()
-        
+    
     async def start(self):
         """Start the browser with optimized settings for real user simulation."""
         self.playwright = await async_playwright().start()
@@ -45,51 +52,78 @@ class BrowserManager:
         
         print(f"Using persistent user data directory: {self.user_data_dir}")
         
+        # Prepare browser launch arguments
+        browser_args = [
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-blink-features=AutomationControlled',
+            '--exclude-switches=enable-automation',
+            '--disable-extensions',
+            '--no-first-run',
+            '--disable-default-apps',
+            '--disable-infobars',
+            '--window-size=1920,1080',
+            '--start-maximized',
+            # Enhanced anti-detection arguments
+            '--disable-features=VizDisplayCompositor,TranslateUI',
+            '--disable-ipc-flooding-protection',
+            '--disable-renderer-backgrounding',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-background-timer-throttling',
+            '--disable-field-trial-config',
+            '--disable-background-networking',
+            '--disable-sync',
+            '--disable-translate',
+            '--disable-web-security',
+            '--allow-running-insecure-content',
+            '--enable-local-file-accesses',
+            '--allow-file-access-from-files',
+            # Performance and caching
+            '--enable-features=NetworkService,NetworkServiceLogging',
+            '--max_old_space_size=4096',
+            '--aggressive-cache-discard',
+            # Memory optimization
+            '--memory-pressure-off',
+            '--renderer-process-limit=10',
+            '--enable-accelerated-2d-canvas',
+            '--enable-gpu-rasterization',
+            # Security and privacy
+            '--disable-client-side-phishing-detection',
+            '--disable-component-extensions-with-background-pages',
+            '--disable-features=AudioServiceOutOfProcess',
+            # Language and locale
+            '--lang=en-US',
+            '--accept-lang=en-US,en,ja'
+        ]
+        
         # Launch browser with persistent user data directory
         self.browser = await self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(self.user_data_dir),
             headless=headless_mode,
             viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            screen={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
             extra_http_headers={
-                'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
-                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Language': 'en-US,en;q=0.9,ja;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Sec-CH-UA': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                'Cache-Control': 'max-age=0',
+                'Sec-CH-UA': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
                 'Sec-CH-UA-Mobile': '?0',
-                'Sec-CH-UA-Platform': '"Linux"',
+                'Sec-CH-UA-Platform': '"Windows"',
+                'Sec-CH-UA-Platform-Version': '"15.0.0"',
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'none',
                 'Sec-Fetch-User': '?1',
-                'Upgrade-Insecure-Requests': '1'
+                'Upgrade-Insecure-Requests': '1',
+                'DNT': '1'
             },
             locale='en-US',
-            timezone_id='America/New_York',
-            permissions=['notifications'],
+            timezone_id='Asia/Tokyo',
+            permissions=['notifications', 'geolocation'],
             color_scheme='light',
-            args=[
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-                '--exclude-switches=enable-automation',
-                '--disable-extensions-except=/path/to/extension',
-                '--disable-extensions',
-                '--no-first-run',
-                '--disable-default-apps',
-                '--disable-infobars',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor',
-                '--window-size=1920,1080',
-                '--start-maximized',
-                # Cache and storage related args
-                '--enable-features=NetworkService,NetworkServiceLogging',
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-                '--enable-local-file-accesses',
-                '--allow-file-access-from-files'
-            ]
+            args=browser_args
         )
         
         # With launch_persistent_context, the browser object is actually a BrowserContext
@@ -98,7 +132,7 @@ class BrowserManager:
         mode_str = "headless" if headless_mode else "visible"
         print(f"Browser started in {mode_str} mode with persistent storage enabled")
         print(f"Profile: {self.profile_name}")
-        
+
     async def close(self):
         """Close the browser and cleanup resources."""
         if self.browser:
@@ -115,6 +149,7 @@ class BrowserManager:
         
         # Hide automation traces with JavaScript
         await page.add_init_script("""
+            // Remove webdriver property completely
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined,
             });
@@ -123,38 +158,127 @@ class BrowserManager:
             delete window.navigator.__proto__.webdriver;
             delete navigator.__proto__.webdriver;
             
-            // Mock chrome runtime
+            // Mock chrome runtime with more realistic properties
             window.chrome = {
-                runtime: {}
+                runtime: {
+                    onConnect: null,
+                    onMessage: null
+                },
+                csi: function() {},
+                loadTimes: function() {
+                    return {
+                        requestTime: Date.now() / 1000,
+                        startLoadTime: Date.now() / 1000,
+                        commitLoadTime: Date.now() / 1000,
+                        finishDocumentLoadTime: Date.now() / 1000,
+                        finishLoadTime: Date.now() / 1000,
+                        firstPaintTime: Date.now() / 1000,
+                        firstPaintAfterLoadTime: 0,
+                        navigationType: "Other"
+                    };
+                }
             };
             
-            // Mock platform to match Linux
+            // Mock platform to match Windows
             Object.defineProperty(navigator, 'platform', {
-                get: () => 'Linux x86_64',
+                get: () => 'Win32',
             });
             
-            // Mock plugins
+            // Mock realistic plugins list
             Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
+                get: () => ({
+                    length: 3,
+                    0: { name: "PDF Viewer", filename: "internal-pdf-viewer" },
+                    1: { name: "Chrome PDF Viewer", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai" },
+                    2: { name: "Chromium PDF Viewer", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai" }
+                }),
             });
             
-            // Mock languages
+            // Mock languages for Japan region with English preference
             Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en', 'zh-CN', 'zh'],
+                get: () => ['en-US', 'en', 'ja'],
             });
             
-            // Mock hardware concurrency (typical for Linux server)
+            Object.defineProperty(navigator, 'language', {
+                get: () => 'en-US',
+            });
+            
+            // Mock hardware concurrency (typical for modern Windows PC)
             Object.defineProperty(navigator, 'hardwareConcurrency', {
-                get: () => 4,
+                get: () => 8,
             });
             
-            // Override permissions
+            // Mock memory information
+            Object.defineProperty(navigator, 'deviceMemory', {
+                get: () => 8,
+            });
+            
+            // Mock connection information
+            Object.defineProperty(navigator, 'connection', {
+                get: () => ({
+                    effectiveType: '4g',
+                    rtt: 50,
+                    downlink: 10,
+                    saveData: false
+                }),
+            });
+            
+            // Mock permissions with realistic responses
             const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
+            window.navigator.permissions.query = (parameters) => {
+                const name = parameters.name;
+                if (name === 'notifications') {
+                    return Promise.resolve({ state: 'default' });
+                } else if (name === 'geolocation') {
+                    return Promise.resolve({ state: 'prompt' });
+                } else if (name === 'camera') {
+                    return Promise.resolve({ state: 'prompt' });
+                } else if (name === 'microphone') {
+                    return Promise.resolve({ state: 'prompt' });
+                }
+                return originalQuery(parameters);
+            };
+            
+            // Override Date to match Japan timezone
+            const originalDate = Date;
+            Date = class extends originalDate {
+                constructor(...args) {
+                    if (args.length === 0) {
+                        super();
+                    } else {
+                        super(...args);
+                    }
+                }
+                
+                getTimezoneOffset() {
+                    return -540; // JST (UTC+9)
+                }
+            };
+            Date.prototype = originalDate.prototype;
+            Date.now = originalDate.now;
+            Date.parse = originalDate.parse;
+            Date.UTC = originalDate.UTC;
+            
+            // Hide automation-related properties
+            Object.defineProperty(window, 'outerWidth', {
+                get: () => window.innerWidth,
+            });
+            
+            Object.defineProperty(window, 'outerHeight', {
+                get: () => window.innerHeight + 85, // Account for browser chrome
+            });
+            
+            // Mock WebGL properties
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                if (parameter === 37445) { // UNMASKED_VENDOR_WEBGL
+                    return 'Intel Inc.';
+                }
+                if (parameter === 37446) { // UNMASKED_RENDERER_WEBGL
+                    return 'Intel(R) HD Graphics 630';
+                }
+                return getParameter.call(this, parameter);
+            };
         """)
         
         return page

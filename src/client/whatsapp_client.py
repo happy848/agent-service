@@ -327,13 +327,11 @@ class WhatsAppBrowserClient:
                     continue_selectors = [
                         'button:has-text("Continue")',
                         'button:has-text("continue")',
-                        'button:has-text("CONTINUE")',
                         'button:has-text("继续")',
                         '[data-testid*="continue" i]',
                         '.continue-button',
                         'button[aria-label="Continue" i]',
                         'button[aria-label="continue" i]',
-                        'button[aria-label="CONTINUE" i]',
                         'button[aria-label="继续"]'
                     ]
                     
@@ -410,10 +408,24 @@ class WhatsAppBrowserClient:
             
             logger.info(f"Found {len(unread_messages)} unread chats")
             
+            
+            
+            
+            # unread_messages
+            
+            
+            
+            
+            
             # Step 3: Click the first unread message
             first_unread = unread_messages[0]
             logger.info(f"Clicking first unread chat: {first_unread.get('contact_name', 'Unknown')}")
             
+            
+            # 调试，只处理AgentsBen的消息
+            if (first_unread['contact_name'] != 'AgentsBen'):
+                return result
+
             # Find and click the first chat with unread messages
             first_chat_element = await self._find_and_click_first_unread_chat()
             
@@ -775,48 +787,41 @@ class WhatsAppBrowserClient:
     async def _send_message_with_anti_detection(self, p_element, message: str):
         """
         Advanced message sending method to avoid automation detection.
-        Uses multiple strategies to simulate human behavior.
+        Uses keyboard typing with random intervals to simulate human behavior.
         """
         try:
             # Strategy 1: Focus and clear with multiple methods
             await p_element.click()
             await self.page.wait_for_timeout(random.randint(100, 300))
             
-            # Simulate human-like clearing behavior
-            # await self.page.keyboard.press('Control+a')
-            # await self.page.wait_for_timeout(random.randint(50, 150))
-            # await self.page.keyboard.press('Delete')
-            # await self.page.wait_for_timeout(random.randint(100, 200))
+            # Clear existing content
+            await self.page.keyboard.press('Control+a')
+            await self.page.wait_for_timeout(random.randint(50, 150))
+            await self.page.keyboard.press('Delete')
+            await self.page.wait_for_timeout(random.randint(100, 200))
             
-            # Strategy 2: Use innerHTML injection with random pauses
-            # Split message into smaller chunks to simulate natural typing
-            chunk_size = random.randint(3, 8)
-            message_chunks = [message[i:i+chunk_size] for i in range(0, len(message), chunk_size)]
-            
-            accumulated_text = ""
-            for i, chunk in enumerate(message_chunks):
-                accumulated_text += chunk
+            # Strategy 2: Use keyboard.type() with random intervals between characters
+            # Split message into individual characters for more natural typing
+            for i, char in enumerate(message):
+                # Type each character
+                await self.page.keyboard.type(char)
                 
-                # Set content using innerHTML to avoid character-by-character detection
-                await p_element.evaluate(f'''
-                    element => {{
-                        element.innerHTML = `{accumulated_text}`;
-                        // Trigger input events to simulate real typing
-                        element.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        element.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    }}
-                ''')
-                
-                # Random pause between chunks to simulate thinking/typing rhythm
-                if i < len(message_chunks) - 1:  # Don't pause after last chunk
-                    pause_time = random.randint(100, 500)
-                    await self.page.wait_for_timeout(pause_time)
+                # Add random interval between characters (30-150ms)
+                if i < len(message) - 1:  # Don't pause after last character
+                    char_interval = random.randint(30, 150)
+                    await self.page.wait_for_timeout(char_interval)
+                    
+                    # Occasionally add longer pauses to simulate thinking (5% chance)
+                    if random.random() < 0.05:
+                        thinking_pause = random.randint(300, 800)
+                        await self.page.wait_for_timeout(thinking_pause)
             
             # Strategy 3: Random additional human-like behaviors
             if random.random() < 0.3:  # 30% chance to simulate backspace and retype
                 await self.page.keyboard.press('Backspace')
                 await self.page.wait_for_timeout(random.randint(50, 150))
-                await p_element.type(message[-1])  # Retype last character
+                # Retype last character
+                await self.page.keyboard.type(message[-1])
                 await self.page.wait_for_timeout(random.randint(100, 200))
             
             # Strategy 4: Multiple ways to send message
