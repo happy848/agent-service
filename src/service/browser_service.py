@@ -7,7 +7,6 @@ import logging
 from typing import Dict, Optional
 
 from client.whatsapp_client import WhatsAppBrowserClient
-from client.browser_client import BrowserManager
 from core import settings
 
 logger = logging.getLogger(__name__)
@@ -206,4 +205,36 @@ class BrowserService:
 
 
 # Global browser service instance
-browser_service = BrowserService() 
+browser_service = BrowserService()
+
+
+def get_browser_service() -> BrowserService:
+    """
+    获取全局browser_service实例的便捷函数
+    
+    Returns:
+        BrowserService: 全局browser_service实例
+    """
+    return browser_service
+
+
+async def get_whatsapp_client():
+    """
+    快速获取WhatsApp客户端的便捷函数
+    
+    Returns:
+        WhatsAppBrowserClient或None: WhatsApp客户端实例
+    """
+    await ensure_browser_service_running()
+    
+    return browser_service.whatsapp_client if browser_service.whatsapp_client else None
+
+
+async def ensure_browser_service_running():
+    """
+    确保browser_service正在运行的便捷函数
+    如果没有运行会自动启动
+    """
+    if not browser_service.is_running():
+        await browser_service.start()
+    return browser_service 

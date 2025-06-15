@@ -1,5 +1,9 @@
 """
 Browser client for WhatsApp Web screenshot capture using Playwright.
+所有操作必须模拟真人操作，随机的停顿，鼠标位置的移动和点击
+每次点击的时候鼠标先移动到该位置，然后点击，记录当前位置，下次点击的时候这个位置作为移动的起始位置
+鼠标移动的曲线模拟人类正常使用Windows 浏览器的移动曲线，同时加上随机时间
+```
 """
 
 import asyncio
@@ -15,8 +19,6 @@ from enum import Enum
 from client.browser_client import BrowserManager
 
 from playwright.async_api import Page
-
-from client.whatsapp_messages_handler import get_whatsapp_message_handler
 
 
 # Configure logger
@@ -88,9 +90,7 @@ class WhatsAppBrowserClient:
         
         # Unread filter state tracking
         self._unread_filter_active = False
-        
-        self.whatsapp_message_handler = get_whatsapp_message_handler(self)
-        
+
     async def __aenter__(self):
         """Async context manager entry."""
         await self.start()
@@ -174,8 +174,7 @@ class WhatsAppBrowserClient:
     def get_filter_state(self) -> bool:
         """Get current tracked filter state."""
         return self._unread_filter_active
-    
-    
+
     async def check_new_messages(self) -> List[Dict[str, Any]]:
         """Check new messages"""
         if not self.page:
@@ -183,16 +182,14 @@ class WhatsAppBrowserClient:
         
         res = await self.click_unread_filter_and_process()
         
-        if res['unread_messages_found']:
-            reply = await self.whatsapp_message_handler.generate_ai_customer_reply(res['chat_messages'])
-            if reply['success']:
-                await self.send_message(reply['ai_reply_message'])
+        # if res['unread_messages_found']:
+        #     reply = await self.whatsapp_message_handler.generate_ai_customer_reply(res['chat_messages'])
+        #     if reply['success']:
+        #         await self._send_message_to_current_chat(reply['ai_reply_message'])
 
         logger.info(f"check_new_messages: {res}")
 
         return res
-    
-    
             
     async def take_screenshot(self, filename_prefix: str = "wa") -> str:
         """Take a screenshot and save it with timestamp."""
@@ -677,7 +674,473 @@ class WhatsAppBrowserClient:
             logger.warning(f"Error parsing message element: {e}")
             return None
 
-    async def send_message(self, message: str) -> Dict[str, Any]:
+    async def send_message_to_contact(self, contact_name: str, message: str) -> Dict[str, Any]:
+        """
+        Send a message to a specific contact.
+        
+        Implementation steps:
+        1. Check if current conversation is the target user, if yes send message directly
+        2. If current conversation is not the target user, check if user is in conversation list, if yes click username and send message
+        3. If not in list, search first, then click username and send message after finding results
+        4. If user not found in search, return failure
+        
+        Args:
+            contact_name: The name of the contact to send message to
+            message: The message text to send
+            
+        Returns:
+            Dictionary with send result:
+            {
+                "success": bool,
+                "contact_found": bool,
+                "method_used": "current_chat" | "chat_list" | "search" | "failed",
+                "message": "sent message text",
+                "error": "error message if failed",
+                "timestamp": "ISO format timestamp"
+            }
+        """
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+        
+        if not contact_name or not contact_name.strip():
+            return {
+                "success": False,
+                "contact_found": False,
+                "method_used": "failed",
+                "message": message,
+                "error": "Contact name cannot be empty",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        if not message or not message.strip():
+            return {
+                "success": False,
+                "contact_found": False,
+                "method_used": "failed",
+                "message": "",
+                "error": "Message cannot be empty",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        result = {
+            "success": False,
+            "contact_found": False,
+            "method_used": "failed",
+            "message": message.strip(),
+            "error": None,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        target_contact = contact_name.strip()
+        logger.info(f"Attempting to send message to contact: {target_contact}")
+        
+        try:
+            # Step 1: Check if current conversation is the target user
+            current_contact_name = await self._get_current_chat_contact_name()
+            contact_info = None
+            
+            # If current chat matches target, use current chat
+            if current_contact_name and self._is_contact_match(current_contact_name, target_contact):
+                logger.info(f"Target contact is already in current chat: {current_contact_name}")
+                result["method_used"] = "current_chat"
+                contact_info = {"name": current_contact_name, "element": None}  # No need to click
+            else:
+                # Step 2: Try to find contact in chat list
+                contact_info = await self._find_contact_in_chat_list(target_contact)
+                if contact_info:
+                    logger.info(f"Found contact in chat list: {contact_info['name']}")
+                    result["method_used"] = "chat_list"
+                else:
+                    # Step 3: Search for contact
+                    search_result = await self._search_and_select_contact(target_contact)
+                    if search_result["success"]:
+                        logger.info(f"Found contact through search: {search_result['contact_name']}")
+                        result["method_used"] = "search"
+                        # After search, the contact should be selected, no need to click again
+                        contact_info = {"name": search_result["contact_name"], "element": None}
+                    else:
+                        result["error"] = search_result["error"]
+                        logger.error(result["error"])
+                        return result
+            
+            if not contact_info:
+                result["error"] = "Contact not found in chat list or search results"
+                logger.error(result["error"])
+                return result
+            
+            # Only click if we need to switch chats (not already in target chat)
+            if contact_info["element"] is not None:
+                click_success = await self._click_chat_contact(contact_info)
+                if not click_success:
+                    result["error"] = "Failed to click on contact"
+                    logger.error(result["error"])
+                    return result
+            
+            current_contact_name = await self._get_current_chat_contact_name()
+            if not current_contact_name or not self._is_contact_match(current_contact_name, target_contact):
+                result["error"] = "Current chat is not the target contact"
+                logger.error(result["error"])
+                return result
+
+            await self.page.wait_for_timeout(random.randint(500, 1500))
+            send_result = await self._send_message_to_current_chat(message)
+            
+            result["contact_found"] = True
+            result["success"] = send_result.get("success", False)
+            result["error"] = send_result.get("error")
+            
+            return result
+        except Exception as e:
+            error_msg = f"Error sending message to contact '{target_contact}': {e}"
+            result["error"] = error_msg
+            logger.error(error_msg)
+            return result
+
+    async def _get_current_chat_contact_name(self) -> Optional[str]:
+        """
+        Get the name of the contact in the currently open chat based on HTML structure.
+        
+        Returns:
+            Contact name if found, None otherwise
+        """
+        try:
+            # Wait for main chat area to be present
+            await self.page.wait_for_selector('#main', timeout=3000)
+            
+            # Try multiple selectors for the contact name in header based on WhatsApp structure
+            contact_selectors = [
+                '#main header div[role="button"] span[dir="auto"]',
+            ]
+            
+            for selector in contact_selectors:
+                try:
+                    contact_element = await self.page.wait_for_selector(selector, timeout=1000)
+                    if contact_element:
+                        contact_name = await contact_element.text_content()
+                        if contact_name and contact_name.strip():
+                            # Filter out common non-contact text
+                            name = contact_name.strip()
+                            # Skip if it looks like a time, status, or other UI element
+                            if not re.match(r'^\d{2}:\d{2}$', name) and name not in ['在线', 'online', '输入中', 'typing']:
+                                logger.debug(f"Found current contact name with selector '{selector}': {name}")
+                                return name
+                except:
+                    continue
+            logger.warning("Could not find current chat contact name")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting current chat contact name: {e}")
+            return None
+
+    def _is_contact_match(self, current_contact: str, target_contact: str) -> bool:
+        """
+        Check if two contact names match (case insensitive, with some fuzzy matching).
+        
+        Args:
+            current_contact: Current contact name
+            target_contact: Target contact name
+            
+        Returns:
+            True if contacts match, False otherwise
+        """
+        if not current_contact or not target_contact:
+            return False
+        
+        current = current_contact.lower().strip()
+        target = target_contact.lower().strip()
+        
+        # Exact match
+        if current == target:
+            return True
+        
+        # Check if one contains the other (for partial matches)
+        if current in target or target in current:
+            return True
+        
+        # Check if they match when removing common suffixes/prefixes
+        # Remove common phone number formatting
+        current_clean = re.sub(r'[+\-\s\(\)]', '', current)
+        target_clean = re.sub(r'[+\-\s\(\)]', '', target)
+        
+        if current_clean == target_clean:
+            return True
+        
+        return False
+
+    async def _find_contact_in_chat_list(self, target_contact: str) -> Optional[Dict[str, Any]]:
+        """
+        Find a contact in the chat list using Playwright locators for fast string matching.
+        
+        Args:
+            target_contact: The contact name to search for
+            
+        Returns:
+            Dictionary with contact info if found, None otherwise
+        """
+        try:
+            
+            # Wait for chat list to be visible
+            await self.page.wait_for_selector('[aria-label="对话列表"], [aria-label="Chat list"]', timeout=5000)
+            
+            # Use Playwright locator to find chat item by contact name
+            # Try different matching strategies
+            contact_locators = [
+                # Exact match using text content
+                self.page.locator('[role="listitem"] span[dir="auto"]').filter(has_text=target_contact),
+                # Exact match using title attribute
+                self.page.locator(f'[role="listitem"] span[title="{target_contact}"]'),
+            ]
+            
+            for locator in contact_locators:
+                try:
+                    # Check if any matching elements exist
+                    if await locator.count() > 0:
+                        # Get the first matching chat item
+                        first_match = locator.first
+                        
+                        # Get the contact name from title attribute or text content
+                        contact_name = None
+                        try:
+                            # Try to get from title attribute first
+                            title_element = first_match.locator('span[title]').first
+                            if await title_element.count() > 0:
+                                contact_name = await title_element.get_attribute('title')
+                        except:
+                            pass
+                        
+                        # Fallback to text content if no title
+                        if not contact_name:
+                            try:
+                                name_element = first_match.locator('span[dir="auto"]').first
+                                if await name_element.count() > 0:
+                                    contact_name = await name_element.text_content()
+                                    contact_name = contact_name.strip() if contact_name else None
+                            except:
+                                pass
+                        
+                        if contact_name and self._is_contact_match(contact_name, target_contact):
+                            logger.info(f"Found matching contact in chat list: {contact_name}")
+                            
+                            # Get the actual element for clicking
+                            element = await first_match.element_handle()
+                            return {
+                                'name': contact_name,
+                                'element': element
+                            }
+                        
+                except Exception as e:
+                    logger.debug(f"Locator strategy failed: {e}")
+                    continue
+            
+            logger.info(f"Contact '{target_contact}' not found in chat list")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error finding contact in chat list: {e}")
+            return None
+
+
+    async def _click_chat_contact(self, contact_info: Dict[str, Any]) -> bool:
+        """
+        Click on a contact in the chat list based on HTML structure.
+        
+        Args:
+            contact_info: Dictionary containing contact element
+            
+        Returns:
+            True if click was successful, False otherwise
+        """
+        try:
+            chat_element = contact_info['element']
+            
+            if chat_element:
+                # Scroll element into view if needed
+                await chat_element.scroll_into_view_if_needed()
+                await self.page.wait_for_timeout(200)
+                
+                # Click the element
+                await chat_element.click()
+                await self.page.wait_for_timeout(random.randint(500, 1000))  # Wait for chat to load
+                logger.info(f"Successfully clicked on contact: {contact_info['name']}")
+                return True
+            else:
+                logger.error(f"Chat element not found for contact: {contact_info['name']}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"Error clicking chat contact: {e}")
+            return False
+
+    async def _search_and_select_contact(self, target_contact: str) -> Dict[str, Any]:
+        """
+        Search for a contact using WhatsApp's search functionality and select the first result.
+        
+        Args:
+            target_contact: The contact name to search for
+            
+        Returns:
+            Dictionary with search result:
+            {
+                "success": bool,
+                "contact_name": str,
+                "error": str
+            }
+        """
+        result = {
+            "success": False,
+            "contact_name": "",
+            "error": None
+        }
+
+        try:
+            # First try to activate search mode by clicking the search button
+            search_button_selectors = [
+                '#side button[aria-label="搜索或开始新对话"]',
+                '#side button[aria-label="Search or start new chat"]',
+            ]
+            
+            for selector in search_button_selectors:
+                try:
+                    search_button = await self.page.wait_for_selector(selector, timeout=2000)
+                    if search_button:
+                        await search_button.click()
+                        await self.page.wait_for_timeout(200)
+                        logger.debug(f"Activated search with button selector: {selector}")
+                        break
+                except:
+                    continue
+            
+            # Find the search input field based on HTML structure
+            search_input_selectors = [
+                '[aria-label="搜索输入内容文本框"][contenteditable="true"]',
+                '[aria-label="Search input text box"][contenteditable="true"]', 
+            ]
+            
+            search_input = None
+            for selector in search_input_selectors:
+                try:
+                    search_input = await self.page.wait_for_selector(selector, timeout=1000)
+                    if search_input:
+                        logger.debug(f"Found search input with selector: {selector}")
+                        break
+                except:
+                    continue
+            
+            if not search_input:
+                result["error"] = "Search input field not found"
+                return result
+            
+            # Clear existing search content and enter target contact name
+            await search_input.click()
+            
+            await self.human_like_input(search_input, target_contact, clear_first=True, press_enter=True)
+            
+            await self.page.wait_for_timeout(random.randint(1500, 3000))  # Wait for search results
+            
+            # Find the contact in search results
+            chat_contact = await self._find_contact_in_chat_list(target_contact)
+            
+            if not chat_contact:
+                # Clear search before returning
+                await self._clear_search()
+                result["error"] = f"No search results found for '{target_contact}'"
+                return result
+            
+            # Click on the found result
+            click_success = await self._click_search_result(chat_contact)
+            
+            if click_success:
+                result["success"] = True
+                result["contact_name"] = chat_contact['name']
+                logger.info(f"Successfully selected contact from search: {chat_contact['name']}")
+            else:
+                result["error"] = "Failed to click on search result"
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error searching for contact: {e}"
+            result["error"] = error_msg
+            logger.error(error_msg)
+            return result
+
+    async def _click_search_result(self, result_info: Dict[str, Any]) -> bool:
+        """
+        Click on a search result to open the chat based on HTML structure.
+        
+        Args:
+            result_info: Dictionary containing result element
+            
+        Returns:
+            True if click was successful, False otherwise
+        """
+        try:
+            result_element = result_info['element']
+            
+            # Based on HTML structure, find the clickable area within the search result
+            clickable_selectors = [
+                '[role="button"]',  # Primary from HTML structure
+            ]
+            
+            clickable_element = None
+            for selector in clickable_selectors:
+                try:
+                    clickable_element = await result_element.query_selector(selector)
+                    if clickable_element:
+                        logger.debug(f"Found clickable search result with selector: {selector}")
+                        break
+                except:
+                    continue
+            
+            if clickable_element:
+                # Scroll into view and click
+                await clickable_element.scroll_into_view_if_needed()
+                await self.page.wait_for_timeout(200)
+                await clickable_element.click()
+            else:
+                # Fallback: click the result element directly
+                await result_element.scroll_into_view_if_needed()
+                await result_element.click()
+            
+            # Wait for chat to load
+            await self.page.wait_for_timeout(1500)
+            
+            logger.info(f"Successfully clicked on search result: {result_info['name']}")
+            
+            # Clear the search after successful selection
+            await self._clear_search()
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error clicking search result: {e}")
+            return False
+
+    async def _clear_search(self):
+        """Clear the search input field based on HTML structure."""
+        try:
+            # Look for cancel search button first (from HTML structure)
+            cancel_selectors = [
+                '[aria-label="取消搜索"]',
+                '[aria-label="Cancel search"]',
+            ]
+            
+            for selector in cancel_selectors:
+                try:
+                    cancel_button = await self.page.query_selector(selector)
+                    if cancel_button:
+                        await cancel_button.click()
+                        await self.page.wait_for_timeout(500)
+                        logger.debug(f"Cleared search using cancel button: {selector}")
+                        return
+                except:
+                    continue
+            
+        except Exception as e:
+            logger.warning(f"Error clearing search: {e}")
+
+    async def _send_message_to_current_chat(self, message: str) -> Dict[str, Any]:
         """
         Send a message in the current WhatsApp chat by typing in the input field and pressing Enter.
         Uses random delays between characters to simulate natural human typing.
@@ -721,8 +1184,6 @@ class WhatsAppBrowserClient:
                 '[aria-label="输入消息"]',
                 '[aria-label="Type a message"]',
                 '[contenteditable="true"][role="textbox"]',
-                '.lexical-rich-text-input [contenteditable="true"]',
-                'footer [contenteditable="true"]'
             ]
             
             input_element = None
@@ -740,42 +1201,15 @@ class WhatsAppBrowserClient:
                 logger.error("Could not find message input field")
                 return result
             
-            # Click on the input field to focus it
-            await input_element.click()
-            await self.page.wait_for_timeout(500)
+            await self.human_like_input(input_element, message, clear_first=True, press_enter=True)
             
-            # Clear existing content in the input field
-            await input_element.evaluate('element => element.innerHTML = ""')
-            
-            # Find the paragraph element inside the input for typing
-            p_element = await input_element.query_selector('p')
-            if not p_element:
-                # If no p element exists, create one
-                await input_element.evaluate('''
-                    element => {
-                        element.innerHTML = '<p class="selectable-text copyable-text x15bjb6t x1n2onr6" style="text-indent: 0px; margin-top: 0px; margin-bottom: 0px;"></p>';
-                    }
-                ''')
-                p_element = await input_element.query_selector('p')
-            
-            if p_element:
-                # Advanced anti-detection input method
-                await self._send_message_with_anti_detection(p_element, message)
-                
-                logger.info(f"Sent message: {message}")
-                
-                # Wait for message to be sent
-                await self.page.wait_for_timeout(random.randint(2000, 3000))
+            logger.info(f"Sent message: {message}")
 
-                # Save conversation HTML for debugging
-                await self._save_conversation_html_to_log()
+            # Save conversation HTML for debugging
+            await self._save_conversation_html_to_log()
 
-                result["success"] = True
-                logger.info(f"Successfully sent message: {message}")
-                
-            else:
-                result["error"] = "Could not find or create paragraph element in input field"
-                logger.error("Could not find paragraph element for typing")
+            result["success"] = True
+            logger.info(f"Successfully sent message: {message}")
 
         except Exception as e:
             error_msg = f"Error sending message: {e}"
@@ -783,110 +1217,7 @@ class WhatsAppBrowserClient:
             logger.error(error_msg)
         
         return result
-    
-    async def _send_message_with_anti_detection(self, p_element, message: str):
-        """
-        Advanced message sending method to avoid automation detection.
-        Uses keyboard typing with random intervals to simulate human behavior.
-        """
-        try:
-            # Strategy 1: Focus and clear with multiple methods
-            await p_element.click()
-            await self.page.wait_for_timeout(random.randint(100, 300))
-            
-            # Clear existing content
-            await self.page.keyboard.press('Control+a')
-            await self.page.wait_for_timeout(random.randint(50, 150))
-            await self.page.keyboard.press('Delete')
-            await self.page.wait_for_timeout(random.randint(100, 200))
-            
-            # Strategy 2: Use keyboard.type() with random intervals between characters
-            # Split message into individual characters for more natural typing
-            for i, char in enumerate(message):
-                # Type each character
-                await self.page.keyboard.type(char)
-                
-                # Add random interval between characters (30-150ms)
-                if i < len(message) - 1:  # Don't pause after last character
-                    char_interval = random.randint(30, 150)
-                    await self.page.wait_for_timeout(char_interval)
-                    
-                    # Occasionally add longer pauses to simulate thinking (5% chance)
-                    if random.random() < 0.05:
-                        thinking_pause = random.randint(300, 800)
-                        await self.page.wait_for_timeout(thinking_pause)
-            
-            # Strategy 3: Random additional human-like behaviors
-            if random.random() < 0.3:  # 30% chance to simulate backspace and retype
-                await self.page.keyboard.press('Backspace')
-                await self.page.wait_for_timeout(random.randint(50, 150))
-                # Retype last character
-                await self.page.keyboard.type(message[-1])
-                await self.page.wait_for_timeout(random.randint(100, 200))
-            
-            # Strategy 4: Multiple ways to send message
-            send_method = random.choice(['enter', 'click_send', 'shift_enter'])
-            send_method = 'enter'
-            
-            if send_method == 'enter':
-                # Standard Enter press with random timing
-                await self.page.wait_for_timeout(random.randint(200, 800))
-                await self.page.keyboard.press('Enter')
-                
-            elif send_method == 'click_send':
-                # Try to click send button instead of Enter
-                try:
-                    send_button = await self.page.wait_for_selector(
-                        '[aria-label="发送"], [aria-label="Send"], [data-testid="send"], button[aria-label*="send" i]', 
-                        timeout=2000
-                    )
-                    if send_button:
-                        await send_button.click()
-                    else:
-                        # Fallback to Enter
-                        await self.page.keyboard.press('Enter')
-                except:
-                    # Fallback to Enter
-                    await self.page.keyboard.press('Enter')
-                    
-            else:  # shift_enter fallback
-                # Sometimes people use Shift+Enter then Enter
-                if random.random() < 0.5:
-                    await self.page.keyboard.press('Shift+Enter')
-                    await self.page.wait_for_timeout(random.randint(100, 300))
-                await self.page.keyboard.press('Enter')
-            
-            # Strategy 5: Post-send human behavior simulation
-            post_send_behavior = random.choice(['scroll', 'click_away', 'wait'])
-            
-            if post_send_behavior == 'scroll':
-                # Sometimes people scroll after sending
-                await self.page.mouse.wheel(0, random.randint(-100, 100))
-                await self.page.wait_for_timeout(random.randint(200, 500))
-                
-            elif post_send_behavior == 'click_away':
-                # Click somewhere else then back to input
-                try:
-                    chat_area = await self.page.query_selector('#main')
-                    if chat_area:
-                        box = await chat_area.bounding_box()
-                        if box:
-                            await self.page.mouse.click(
-                                box['x'] + box['width'] * 0.5,
-                                box['y'] + box['height'] * 0.3
-                            )
-                            await self.page.wait_for_timeout(random.randint(100, 300))
-                except:
-                    pass
-            
-            # Always end with a small random wait
-            await self.page.wait_for_timeout(random.randint(300, 700))
-            
-        except Exception as e:
-            logger.error(f"Error in anti-detection send: {e}")
-            # Fallback to simple Enter press
-            await self.page.keyboard.press('Enter')
-    
+  
     async def _save_conversation_html_to_log(self):
         """
         Save conversation list HTML content to log file for debugging.
@@ -963,6 +1294,86 @@ class WhatsAppBrowserClient:
         except Exception as e:
             logger.error(f"Error during debug file cleanup: {e}")
 
+    async def human_like_input(self, element_or_selector, text: str, clear_first: bool = True, press_enter: bool = True) -> bool:
+        """
+        通用的人类化输入方法，模拟真实用户的输入行为
+        
+        Args:
+            element_or_selector: 元素对象或CSS选择器字符串
+            text: 要输入的文本内容
+            clear_first: 是否先清空现有内容，默认为True
+            press_enter: 是否在输入完成后按Enter键，默认为False
+            
+        Returns:
+            bool: 输入是否成功
+        """
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+            
+        if not text or not text.strip():
+            logger.warning("Input text is empty")
+            return False
+            
+        try:
+            # 获取目标元素
+            target_element = None
+            if isinstance(element_or_selector, str):
+                # 如果是选择器字符串，查找元素
+                target_element = await self.page.wait_for_selector(element_or_selector, timeout=5000)
+                if not target_element:
+                    logger.error(f"Element not found with selector: {element_or_selector}")
+                    return False
+            else:
+                # 如果是元素对象，直接使用
+                target_element = element_or_selector
+            
+            # 点击元素获得焦点
+            await target_element.click()
+            await self.page.wait_for_timeout(random.randint(200, 500))
+
+            # 清空现有内容
+            if clear_first:
+                await self.page.keyboard.press('Control+a')
+                await self.page.wait_for_timeout(random.randint(50, 150))
+                await self.page.keyboard.press('Backspace')
+                await self.page.wait_for_timeout(random.randint(100, 200))
+            
+            # 逐字符输入，模拟人类打字习惯
+            for i, char in enumerate(text.strip()):
+                # 输入当前字符
+                await self.page.keyboard.type(char)
+                
+                # 字符间随机间隔 (30-150ms)
+                if i < len(text.strip()) - 1:  # 最后一个字符后不暂停
+                    char_interval = random.randint(20, 100)
+                    await self.page.wait_for_timeout(char_interval)
+                    
+                    # 5% 概率模拟思考停顿
+                    if random.random() < 0.05:
+                        thinking_pause = random.randint(300, 800)
+                        await self.page.wait_for_timeout(thinking_pause)
+            
+            # 模拟可能的人类行为：30% 概率进行退格重打最后一个字符
+            if len(text.strip()) > 0 and random.random() < 0.3:
+                await self.page.keyboard.press('Backspace')
+                await self.page.wait_for_timeout(random.randint(50, 150))
+                # 重新输入最后一个字符
+                await self.page.keyboard.type(text.strip()[-1])
+                await self.page.wait_for_timeout(random.randint(100, 200))
+            
+            # 输入完成后的随机等待
+            await self.page.wait_for_timeout(random.randint(100, 300))
+            
+            # 根据参数决定是否按Enter键
+            if press_enter:
+                await self.page.keyboard.press('Enter')
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in human_like_input: {e}")
+            return False
+
 
 class WhatsAppMonitor:
     """WhatsApp Web monitoring class that supports timed execution of multiple tasks"""
@@ -988,11 +1399,11 @@ class WhatsAppMonitor:
         )
         
         # Message check task
-        self.add_task(
-            TaskType.MESSAGE_CHECK,
-            self.whatsapp_client.check_new_messages,
-            "message_check_task"
-        )
+        # self.add_task(
+        #     TaskType.MESSAGE_CHECK,
+        #     self.whatsapp_client.check_new_messages,
+        #     "message_check_task"
+        # )
     
     def add_task(
         self,
