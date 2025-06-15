@@ -62,6 +62,21 @@ class WhatsAppTool:
             raise
         
         
+    @staticmethod
+    def normalize_contact_name(contact_name: str) -> str:
+        """
+        标准化联系人名称，移除加号
+        
+        Args:
+            contact_name: 原始联系人名称
+            
+        Returns:
+            处理后的联系人名称
+        """
+        if not contact_name:
+            return contact_name
+        return contact_name.replace("+", "")
+    
     async def get_unread_messages(self) -> List[Dict[str, Any]]:
         """
         获取未读消息
@@ -77,7 +92,8 @@ class WhatsAppTool:
         """
         async with self._lock:
             client = await get_whatsapp_client()
-            return await client.get_contact_chat_list(contact_name)
+            normalized_contact_name = self.normalize_contact_name(contact_name)
+            return await client.get_contact_chat_list(normalized_contact_name)
     
     async def send_message_to_contact(self, contact_name: str, message: str) -> Dict[str, Any]:
         """
@@ -85,7 +101,8 @@ class WhatsAppTool:
         """
         async with self._lock:
             client = await get_whatsapp_client()
-            return await client.send_message_to_contact(contact_name, message)
+            normalized_contact_name = self.normalize_contact_name(contact_name)
+            return await client.send_message_to_contact(normalized_contact_name, message)
     
   
     async def generate_contact_reply_message(self, contact_name: str) -> Dict[str, Any]:
@@ -100,7 +117,8 @@ class WhatsAppTool:
         """
         async with self._lock:
             client = await get_whatsapp_client()
-            chat_list = await client.get_contact_chat_list(contact_name)
+            normalized_contact_name = self.normalize_contact_name(contact_name)
+            chat_list = await client.get_contact_chat_list(normalized_contact_name)
             return await self._generate_contact_reply_message(chat_list)
 
 
@@ -110,8 +128,8 @@ class WhatsAppTool:
         """
         async with self._lock:
             client = await get_whatsapp_client()
-            
-            chat_list = await client.get_contact_chat_list()
+            normalized_contact_name = self.normalize_contact_name(contact_name)
+            chat_list = await client.get_contact_chat_list(normalized_contact_name)
             
             if not chat_list:
                 return {
@@ -128,7 +146,7 @@ class WhatsAppTool:
                 }
             
             reply_message = reply_result["ai_reply_message"]
-            res = await client.send_message_to_contact(contact_name, reply_message)
+            res = await client.send_message_to_contact(normalized_contact_name, reply_message)
             
             return res
 

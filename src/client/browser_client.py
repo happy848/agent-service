@@ -21,7 +21,6 @@ class BrowserManager:
         self.playwright = None
         self.headless = headless
         self.profile_name = profile_name
-        self.connect_to_remote = connect_to_remote  # Format: "ws://host:port/devtools/browser/..."
         
         # Set up persistent user data directory
         if user_data_dir:

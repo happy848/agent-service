@@ -31,6 +31,8 @@ from schema import (
     ServiceMetadata,
     StreamInput,
     UserInput,
+    WhatsAppContactInput,
+    WhatsAppMessageInput,
 )
 from service.utils import (
     convert_message_content_to_string,
@@ -378,17 +380,24 @@ async def whatsapp_unread_messages():
     """WhatsApp unread messages endpoint."""
     return await whatsapp.get_unread_messages()
 
-# curl -s http://localhost:8080/whatsapp/contact_chat_list?contact_name=John%20Doe
-@app.get("/whatsapp/contact_chat_list")
-async def whatsapp_contact_chat_list(contact_name: str):
-    """WhatsApp contact chat list endpoint."""
-    return await whatsapp.get_contact_chat_list(contact_name)
+# curl -s http://localhost:8080/whatsapp/unread_messages
+# [{"contact_name":"f.matheoprod@gmail.com","unread_count":"2","message_preview_container":"default-contact-refreshedf.matheoprod@gmail.com00:17?2","is_muted":false},{"contact_name":"+33 7 75 81 26 36","unread_count":"1","message_preview_container":"+33 7 75 81 26 36昨天Arturmakhmoudov58@gmail.com1","is_muted":false}]# 
 
-# curl -X POST http://localhost:8080/whatsapp/send_message -d '{"contact_name": "John Doe", "message": "Hello, how are you?"}'
+# curl -X POST http://localhost:8080/whatsapp/contact_chat_list -H "Content-Type: application/json" -d '{"contact_name": "f.matheoprod@gmail.com"}'
+# curl -X POST http://localhost:8080/whatsapp/contact_chat_list -H "Content-Type: application/json" -d '{"contact_name": "+33 7 75 81 26 36"}'
+# curl -X POST http://localhost:8080/whatsapp/contact_chat_list -H "Content-Type: application/json" -d '{"contact_name": "AgentsBen"}'
+@app.post("/whatsapp/contact_chat_list")
+async def whatsapp_contact_chat_list(request: WhatsAppContactInput):
+    """WhatsApp contact chat list endpoint."""
+    logger.info(f"WhatsApp contact chat list endpoint: {request.contact_name}")
+    return await whatsapp.get_contact_chat_list(request.contact_name)
+
+# curl -X POST http://localhost:8080/whatsapp/send_message -H "Content-Type: application/json" -d '{"contact_name": "f.matheoprod@gmail.com", "message": "❤️❤️"}'
+# curl -X POST http://localhost:8080/whatsapp/send_message -H "Content-Type: application/json" -d '{"contact_name": "+33 7 75 81 26 36", "message": "let me know when u done the transfer bro, ill top up for u"}'
 @app.post("/whatsapp/send_message")
-async def whatsapp_send_message(contact_name: str, message: str):
+async def whatsapp_send_message(request: WhatsAppMessageInput):
     """WhatsApp send message endpoint."""
-    return await whatsapp.send_message_to_contact(contact_name, message)
+    return await whatsapp.send_message_to_contact(request.contact_name, request.message)
 
 # curl -s http://localhost:8080/test
 # @app.get("/test")

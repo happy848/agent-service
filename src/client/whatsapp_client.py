@@ -88,9 +88,6 @@ class WhatsAppBrowserClient:
         self._max_continue_attempts = 3
         self._skip_continue_check = False
         
-        # Unread filter state tracking
-        self._unread_filter_active = False
-
     async def __aenter__(self):
         """Async context manager entry."""
         await self.start()
@@ -108,14 +105,22 @@ class WhatsAppBrowserClient:
         # Create new page with anti-detection
         self.page = await self.browser_manager.new_page()
         
+        
+    async def goto_whatsapp_web(self):
+        """Navigate to WhatsApp Web."""
         # Navigate to WhatsApp Web
-        await self.page.goto('https://web.whatsapp.com/')
         
-        # Wait for the page to load
-        await self.page.wait_for_load_state('networkidle')
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
         
-        # Reset filter state when page loads
-        self.reset_filter_state()
+        whats_app_web_url = 'https://web.whatsapp.com/'
+        
+        if self.page.url != whats_app_web_url:
+            await self.page.goto(whats_app_web_url)
+            await self.page.wait_for_load_state('networkidle')
+        else:
+            logger.info("Already on WhatsApp Web")
+            return self.page
         
         logger.info("Browser started and navigated to WhatsApp Web")
         if not self.browser_manager.headless:
@@ -123,6 +128,8 @@ class WhatsAppBrowserClient:
         else:
             logger.info("Note: Running in headless mode. QR code scanning requires pre-authenticated session.")
         
+        await self.page.wait_for_timeout(5000)
+
         # Auto start monitoring if enabled
         if self.auto_start_monitoring:
             await self._start_monitoring()
@@ -166,15 +173,6 @@ class WhatsAppBrowserClient:
             return self.monitor.get_status()
         return {'is_running': False, 'monitor_exists': False}
         
-    def reset_filter_state(self):
-        """Reset the unread filter state (useful when page is refreshed or reloaded)."""
-        self._unread_filter_active = False
-        logger.info("Reset unread filter state to inactive")
-        
-    def get_filter_state(self) -> bool:
-        """Get current tracked filter state."""
-        return self._unread_filter_active
-
     async def check_new_messages(self) -> List[Dict[str, Any]]:
         """Check new messages"""
         if not self.page:
@@ -635,11 +633,13 @@ class WhatsAppBrowserClient:
         Returns:
             True if contacts match, False otherwise
         """
+        logger.info(f"--------------------------------")
+        logger.info(f"Checking if {current_contact} matches {target_contact}")
         if not current_contact or not target_contact:
             return False
         
-        current = current_contact.lower().strip()
-        target = target_contact.lower().strip()
+        current = current_contact.lower().strip().replace("+", "")
+        target = target_contact.lower().strip().replace("+", "")
         
         # Exact match
         if current == target:
@@ -670,19 +670,50 @@ class WhatsAppBrowserClient:
             Dictionary with contact info if found, None otherwise
         """
         try:
+            # First check if we're logged in and on the main page
+            try:
+                await self.page.wait_for_selector('#side', timeout=3000)
+            except:
+                logger.warning("WhatsApp sidebar not found, page may not be fully loaded")
+                return None
             
-            # Wait for chat list to be visible
-            await self.page.wait_for_selector('[aria-label="对话列表"], [aria-label="Chat list"]', timeout=5000)
-            
-            # Use Playwright locator to find chat item by contact name
-            # Try different matching strategies
-            contact_locators = [
-                # Exact match using text content
-                self.page.locator('[role="listitem"] span[dir="auto"]').filter(has_text=target_contact),
-                # Exact match using title attribute
-                self.page.locator(f'[role="listitem"] span[title="{target_contact}"]'),
+            # Wait for chat list to be visible - try multiple selectors
+            chat_list_selectors = [
+                '#pane-side',
+                '[aria-label="对话列表"]',
+                '[aria-label="Chat list"]', 
             ]
             
+            chat_list_found = False
+            for selector in chat_list_selectors:
+                try:
+                    await self.page.wait_for_selector(selector, timeout=2000)
+                    chat_list_found = True
+                    logger.debug(f"Found chat list with selector: {selector}")
+                    break
+                except:
+                    continue
+            
+            if not chat_list_found:
+                logger.error("Could not find chat list with any known selector")
+                return None
+            
+            # Use Playwright locator to find chat item by contact name
+            # Try different matching strategies with improved safety and precision
+            contact_locators = []
+            
+            # Strategy 1: Direct text match within pane-side
+            contact_locators.append(
+                self.page.locator('#pane-side').get_by_text(target_contact)
+            )
+            
+            # Strategy 2: Role-based search for all list items within pane-side
+            chat_list_items = self.page.locator('#pane-side [role="listitem"]')
+            # Get all list items
+            items_count = await chat_list_items.count()
+            for i in range(items_count):
+                contact_locators.append(chat_list_items.nth(i))
+         
             for locator in contact_locators:
                 try:
                     # Check if any matching elements exist
@@ -693,22 +724,13 @@ class WhatsAppBrowserClient:
                         # Get the contact name from title attribute or text content
                         contact_name = None
                         try:
-                            # Try to get from title attribute first
-                            title_element = first_match.locator('span[title]').first
-                            if await title_element.count() > 0:
-                                contact_name = await title_element.get_attribute('title')
+                            name_element = first_match.locator('span[dir="auto"]').first
+                            if await name_element.count() > 0:
+                                contact_name = await name_element.text_content()
+                                contact_name = contact_name.strip() if contact_name else None
                         except:
                             pass
-                        
-                        # Fallback to text content if no title
-                        if not contact_name:
-                            try:
-                                name_element = first_match.locator('span[dir="auto"]').first
-                                if await name_element.count() > 0:
-                                    contact_name = await name_element.text_content()
-                                    contact_name = contact_name.strip() if contact_name else None
-                            except:
-                                pass
+                           
                         
                         if contact_name and self._is_contact_match(contact_name, target_contact):
                             logger.info(f"Found matching contact in chat list: {contact_name}")
@@ -725,10 +747,17 @@ class WhatsAppBrowserClient:
                     continue
             
             logger.info(f"Contact '{target_contact}' not found in chat list")
+            
+            await self.take_screenshot()
+            await self._save_conversation_html_to_log()
             return None
             
         except Exception as e:
             logger.error(f"Error finding contact in chat list: {e}")
+            
+            await self.take_screenshot()
+            await self._save_conversation_html_to_log()
+            
             return None
 
 
@@ -996,22 +1025,7 @@ class WhatsAppBrowserClient:
             utc_plus_8 = timezone(timedelta(hours=8))
             timestamp = datetime.now(utc_plus_8).strftime("%Y-%m-%d_%H-%M-%S")
 
-            # Get current chat HTML for additional context
-            current_chat_html = ""
-            try:
-                main_chat = await self.page.query_selector('#main')
-                if main_chat:
-                    current_chat_html = await main_chat.inner_html()
-                    logger.debug("Got current chat HTML")
-            except Exception as e:
-                logger.warning(f"Could not get current chat HTML: {e}")
-                current_chat_html = f"<!-- Error getting current chat: {e} -->"
-            
-            # Get page URL
-            page_url = self.page.url
-            
-            # Create HTML debug file
-            html_content = current_chat_html
+            html_content = await self.page.html()
             
             # Save HTML file
             html_filename = f"whatsapp_debug_{timestamp}.html"
@@ -1075,10 +1089,6 @@ class WhatsAppBrowserClient:
         """
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
-            
-        if not text or not text.strip():
-            logger.warning("Input text is empty")
-            return False
             
         try:
             # 获取目标元素
@@ -1165,11 +1175,9 @@ class WhatsAppBrowserClient:
         unread_messages = []
         
         try:
+            await self.goto_whatsapp_web()
             # Wait for chat list to be visible
             await self.page.wait_for_selector('[aria-label="对话列表"], [aria-label="Chat list"]', timeout=5000)
-            
-            # Find all chat items in the list
-            chat_items = await self.page.query_selector_all('[role="listitem"]')
             
             unread_items = await self.page.query_selector_all('[aria-label*="未读消息"], [aria-label*="unread message"]')
             

@@ -9,6 +9,8 @@ from schema.schema import (
     ServiceMetadata,
     StreamInput,
     UserInput,
+    WhatsAppContactInput,
+    WhatsAppMessageInput,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "FeedbackResponse",
     "ChatHistoryInput",
     "ChatHistory",
+    "WhatsAppContactInput",
+    "WhatsAppMessageInput",
 ]

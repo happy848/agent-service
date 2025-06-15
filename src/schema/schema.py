@@ -168,3 +168,25 @@ class ChatHistoryInput(BaseModel):
 
 class ChatHistory(BaseModel):
     messages: list[ChatMessage]
+
+
+class WhatsAppContactInput(BaseModel):
+    """Input for WhatsApp contact operations."""
+
+    contact_name: str = Field(
+        description="WhatsApp contact name or phone number.",
+        examples=["f.matheoprod@gmail.com", "+33 7 75 81 26 36"],
+    )
+
+
+class WhatsAppMessageInput(BaseModel):
+    """Input for sending WhatsApp messages."""
+
+    contact_name: str = Field(
+        description="WhatsApp contact name or phone number.",
+        examples=["f.matheoprod@gmail.com", "+33 7 75 81 26 36"],
+    )
+    message: str = Field(
+        description="Message content to send.",
+        examples=["Hello, how are you?"],
+    )
