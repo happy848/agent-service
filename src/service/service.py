@@ -37,6 +37,7 @@ from service.utils import (
     langchain_to_chat_message,
     remove_tool_calls,
 )
+from brain import whatsapp
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
@@ -370,6 +371,24 @@ async def health_check():
     """Health check endpoint."""
     return {"status": "ok"}
 
+
+# curl -s http://localhost:8080/whatsapp/unread_messages
+@app.get("/whatsapp/unread_messages")
+async def whatsapp_unread_messages():
+    """WhatsApp unread messages endpoint."""
+    return await whatsapp.get_unread_messages()
+
+# curl -s http://localhost:8080/whatsapp/contact_chat_list?contact_name=John%20Doe
+@app.get("/whatsapp/contact_chat_list")
+async def whatsapp_contact_chat_list(contact_name: str):
+    """WhatsApp contact chat list endpoint."""
+    return await whatsapp.get_contact_chat_list(contact_name)
+
+# curl -X POST http://localhost:8080/whatsapp/send_message -d '{"contact_name": "John Doe", "message": "Hello, how are you?"}'
+@app.post("/whatsapp/send_message")
+async def whatsapp_send_message(contact_name: str, message: str):
+    """WhatsApp send message endpoint."""
+    return await whatsapp.send_message_to_contact(contact_name, message)
 
 # curl -s http://localhost:8080/test
 # @app.get("/test")

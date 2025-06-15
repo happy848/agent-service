@@ -180,16 +180,16 @@ class WhatsAppBrowserClient:
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
         
-        res = await self.click_unread_filter_and_process()
+        unread_contact_messages = await self.get_unread_contact_message()
         
         # if res['unread_messages_found']:
         #     reply = await self.whatsapp_message_handler.generate_ai_customer_reply(res['chat_messages'])
         #     if reply['success']:
         #         await self._send_message_to_current_chat(reply['ai_reply_message'])
 
-        logger.info(f"check_new_messages: {res}")
+        logger.info(f"check_new_messages: {unread_contact_messages}")
 
-        return res
+        return unread_contact_messages
             
     async def take_screenshot(self, filename_prefix: str = "wa") -> str:
         """Take a screenshot and save it with timestamp."""
@@ -215,51 +215,6 @@ class WhatsAppBrowserClient:
         await self._cleanup_old_screenshots(images_dir, filename_prefix)
         
         return str(filepath)
-    
-    async def _check_unread_filter_state(self, filter_element) -> bool:
-        """
-        Check if the unread filter button is currently active/pressed.
-        
-        Args:
-            filter_element: The unread filter button element
-            
-        Returns:
-            True if filter is active, False otherwise
-        """
-        try:
-            # Check common attributes that indicate active state
-            
-            # Method 1: Check aria-pressed attribute
-            aria_pressed = await filter_element.get_attribute('aria-pressed')
-            if aria_pressed == 'true':
-                logger.debug("Filter is active (aria-pressed=true)")
-                return True
-            
-            # Method 2: Check if element has active/selected class
-            class_list = await filter_element.get_attribute('class')
-            if class_list:
-                active_indicators = ['active', 'selected', 'pressed', 'checked', 'on']
-                for indicator in active_indicators:
-                    if indicator in class_list.lower():
-                        logger.debug(f"Filter is active (found '{indicator}' in class)")
-                        return True
-            
-            # Method 3: Check data attributes
-            data_active = await filter_element.get_attribute('data-active')
-            if data_active == 'true':
-                logger.debug("Filter is active (data-active=true)")
-                return True
-            
-            # Method 4: Check if button has different styling (background color, etc.)
-            # This would require getting computed styles, which is more complex
-            
-            logger.debug("Filter appears to be inactive")
-            return False
-            
-        except Exception as e:
-            logger.warning(f"Error checking filter state: {e}")
-            # If we can't determine state, assume it's inactive and allow click
-            return False
     
     async def _cleanup_old_screenshots(self, images_dir: Path, filename_prefix: str = "wa"):
         """Clean up screenshot files older than 10 minutes."""
@@ -296,246 +251,124 @@ class WhatsAppBrowserClient:
         except Exception as e:
             logger.error(f"Error during screenshot cleanup: {e}")
     
-    async def click_unread_filter_and_process(self) -> Dict[str, Any]:
+    async def get_target_contact_chat_active(self, target_contact: str) -> Dict[str, Any]:
         """
-        Click the unread filter button, check for unread messages, 
-        click the first unread message and read its content.
+        Activate (switch to) the chat for a specific contact.
         
+        Args:
+            target_contact: The name of the contact to activate chat for
+            
         Returns:
-            Dictionary with process results including unread messages and chat content
+            Dictionary with activation result:
+            {
+                "success": bool,
+                "contact_found": bool,
+                "method_used": "current_chat" | "chat_list" | "search" | "failed",
+                "contact_name": "actual contact name found",
+                "error": "error message if failed",
+                "timestamp": "ISO format timestamp"
+            }
         """
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
         
         result = {
-            'unread_filter_already_active': self._unread_filter_active,
-            'unread_messages_found': [],
-            'first_chat_clicked': False,
-            'chat_messages': [],
-            'error': None
+            "success": False,
+            "contact_found": False,
+            "method_used": "failed",
+            "contact_name": "",
+            "error": None,
+            "timestamp": datetime.now().isoformat()
         }
         
+        if not target_contact or not target_contact.strip():
+            result["error"] = "Target contact name cannot be empty"
+            logger.error(result["error"])
+            return result
+        
+        target_contact = target_contact.strip()
+        logger.info(f"Activating chat for contact: {target_contact}")
+        
         try:
-            # Step 0: Check and click continue button if present (max 3 attempts)
-            if not self._skip_continue_check and self._continue_check_attempts < self._max_continue_attempts:
-                logger.info(f"Checking for continue button... (attempt {self._continue_check_attempts + 1}/{self._max_continue_attempts})")
-                try:
-                    # Look for continue button with various possible selectors (case insensitive)
-                    continue_selectors = [
-                        'button:has-text("Continue")',
-                        'button:has-text("continue")',
-                        'button:has-text("继续")',
-                        '[data-testid*="continue" i]',
-                        '.continue-button',
-                        'button[aria-label="Continue" i]',
-                        'button[aria-label="continue" i]',
-                        'button[aria-label="继续"]'
-                    ]
-                    
-                    continue_button = None
-                    for selector in continue_selectors:
-                        try:
-                            continue_button = await self.page.wait_for_selector(selector, timeout=2000)
-                            if continue_button:
-                                logger.info(f"Found continue button with selector: {selector}")
-                                break
-                        except:
-                            continue
-                    
-                    self._continue_check_attempts += 1
-                    
-                    if continue_button:
-                        await continue_button.click()
-                        await self.page.wait_for_timeout(1000)  # Wait for page to process
-                        logger.info("Clicked continue button")
-                        # Reset attempts counter since we found and clicked the button
-                        self._continue_check_attempts = 0
-                    else:
-                        logger.info(f"No continue button found on attempt {self._continue_check_attempts}")
-                        # If we've reached max attempts, skip future checks
-                        if self._continue_check_attempts >= self._max_continue_attempts:
-                            self._skip_continue_check = True
-                            logger.info("Reached max continue button check attempts, will skip future checks")
-                        
-                except Exception as e:
-                    self._continue_check_attempts += 1
-                    logger.warning(f"Error checking for continue button (attempt {self._continue_check_attempts}): {e}")
-                    # If we've reached max attempts, skip future checks
-                    if self._continue_check_attempts >= self._max_continue_attempts:
-                        self._skip_continue_check = True
-                        logger.info("Reached max continue button check attempts due to errors, will skip future checks")
-            elif self._skip_continue_check:
-                logger.debug("Skipping continue button check (max attempts reached)")
+            # Step 1: Check if current conversation is the target user
+            current_contact_name = await self._get_current_chat_contact_name()
+            contact_info = None
+            
+            # If current chat matches target, we're already in the right chat
+            if current_contact_name and self._is_contact_match(current_contact_name, target_contact):
+                logger.info(f"Target contact is already active: {current_contact_name}")
+                result["success"] = True
+                result["contact_found"] = True
+                result["method_used"] = "current_chat"
+                result["contact_name"] = current_contact_name
+                return result
+            
+            # Step 2: Try to find contact in chat list
+            contact_info = await self._find_contact_in_chat_list(target_contact)
+            if contact_info:
+                logger.info(f"Found contact in chat list: {contact_info['name']}")
+                result["method_used"] = "chat_list"
+                result["contact_name"] = contact_info['name']
             else:
-                logger.debug("Continue button check disabled")
-            
-                        # Step 1: Click the unread filter button (only if not already active)
-            logger.info("Checking unread filter button state...")
-            unread_filter_button = await self.page.wait_for_selector('#unread-filter', timeout=1000)
-            
-            if unread_filter_button:
-                # Check if filter is already active
-                current_filter_state = await self._check_unread_filter_state(unread_filter_button)
-                
-                if current_filter_state and self._unread_filter_active:
-                    logger.info("Unread filter is already active, skipping click")
-                    result['unread_filter_clicked'] = False
-                    result['unread_filter_already_active'] = True
+                # Step 3: Search for contact
+                search_result = await self._search_and_select_contact(target_contact)
+                if search_result["success"]:
+                    logger.info(f"Found contact through search: {search_result['contact_name']}")
+                    result["method_used"] = "search"
+                    result["contact_name"] = search_result["contact_name"]
+                    # After search, the contact should be selected, no need to click again
+                    contact_info = {"name": search_result["contact_name"], "element": None}
                 else:
-                    await unread_filter_button.click()
-                    await self.page.wait_for_timeout(3000)  # Wait for filter to apply
-                    self._unread_filter_active = True
-                    result['unread_filter_clicked'] = True
-                    result['unread_filter_already_active'] = False
-                    logger.info("Clicked unread filter button and updated state")
-            else:
-                logger.warning("Unread filter button not found, pls login first")
-                result['error'] = "Unread filter button not found, pls login first"
+                    result["error"] = search_result.get("error", "Contact not found in search")
+                    logger.error(result["error"])
+                    return result
+        
+            if not contact_info:
+                result["error"] = "Contact not found in chat list or search results"
+                logger.error(result["error"])
+                return result
+                
+            result["contact_found"] = True
+            
+            # Only click if we need to switch chats (element exists means we need to click)
+            if contact_info["element"] is not None:
+                click_success = await self._click_chat_contact(contact_info)
+                if not click_success:
+                    result["error"] = "Failed to click on contact"
+                    logger.error(result["error"])
+                    return result
+            
+            # Verify we're now in the correct chat
+            await self.page.wait_for_timeout(random.randint(300, 500))  # Wait for chat to load
+            current_contact_name = await self._get_current_chat_contact_name()
+            if not current_contact_name or not self._is_contact_match(current_contact_name, target_contact):
+                result["error"] = "Failed to activate target contact chat"
+                logger.error(result["error"])
                 return result
             
-            # Step 2: Check for unread messages using updated selector strategy
-            logger.info("Checking for unread messages...")
-            unread_messages = await self._get_unread_messages_from_filtered_list()
-            result['unread_messages_found'] = unread_messages
+            result["success"] = True
+            result["contact_name"] = current_contact_name
+            logger.info(f"Successfully activated chat for contact '{current_contact_name}' using method: {result['method_used']}")
             
-            if not unread_messages:
-                logger.info("No unread messages found")
-                result['error'] = "No unread messages found"
-                return result
-            
-            logger.info(f"Found {len(unread_messages)} unread chats")
-            
-            
-            
-            
-            # unread_messages
-            
-            
-            
-            
-            
-            # Step 3: Click the first unread message
-            first_unread = unread_messages[0]
-            logger.info(f"Clicking first unread chat: {first_unread.get('contact_name', 'Unknown')}")
-            
-            
-            # 调试，只处理AgentsBen的消息
-            if (first_unread['contact_name'] != 'AgentsBen'):
-                return result
-
-            # Find and click the first chat with unread messages
-            first_chat_element = await self._find_and_click_first_unread_chat()
-            
-            if first_chat_element:
-                result['first_chat_clicked'] = True
-                logger.info("Successfully clicked first unread chat")
-                
-                # Wait for chat to load
-                await self.page.wait_for_timeout(3000)
-                
-                # Step 4: Read chat messages
-                logger.info("Reading chat messages...")
-                chat_messages = await self.get_chat_messages()
-                result['chat_messages'] = chat_messages
-                
-                logger.info(f"Successfully read {len(chat_messages)} messages from chat")
-                
-            else:
-                result['error'] = "Failed to click first unread chat"
-                logger.error("Failed to click first unread chat")
-                
         except Exception as e:
-            error_msg = f"Error in click_unread_filter_and_process: {e}"
-            logger.error(error_msg)
-            result['error'] = error_msg
+            result["error"] = f"Error activating chat for contact '{target_contact}': {e}"
+            logger.error(result["error"])
             
         return result
-    
-    async def _get_unread_messages_from_filtered_list(self) -> List[Dict[str, Any]]:
-        """
-        Get unread messages from the filtered chat list.
-        This method works after the unread filter has been applied.
-        """
-        messages = []
         
-        try:
-            # Wait for chat list to be visible
-            await self.page.wait_for_selector('[aria-label="对话列表"], [aria-label="Chat list"]', timeout=5000)
-            
-            # Find all chat items in the list
-            chat_items = await self.page.query_selector_all('[role="listitem"]')
-            
-            for chat_item in chat_items:
-                try:
-                    # Look for unread message count indicator
-                    unread_indicator = await chat_item.query_selector('[aria-label*="未读消息"], [aria-label*="unread message"]')
-                    
-                    if unread_indicator:
-                        # Extract unread count from aria-label
-                        aria_label = await unread_indicator.get_attribute('aria-label')
-                        unread_count = re.search(r'(\d+)', aria_label).group(1) if re.search(r'(\d+)', aria_label) else "1"
-                        
-                        # Get contact name
-                        name_element = await chat_item.query_selector('[dir="auto"]')
-                        contact_name = await name_element.text_content() if name_element else "Unknown"
-                        
-                        # Get last message preview
-                        message_elements = await chat_item.query_selector_all('span[dir="auto"], span[dir="ltr"]')
-                        last_message = ""
-                        for msg_elem in message_elements:
-                            text = await msg_elem.text_content()
-                            # Skip contact name and time, get actual message content
-                            if text and text != contact_name and not re.match(r'^\d{2}:\d{2}$', text.strip()):
-                                last_message = text.strip()
-                                break
-                        
-                        messages.append({
-                            'contact_name': contact_name.strip(),
-                            'unread_count': unread_count,
-                            'last_message_preview': last_message,
-                            'timestamp': datetime.now().isoformat(),
-                            'chat_element': chat_item  # Store element reference for clicking
-                        })
-                        
-                except Exception as e:
-                    logger.warning(f"Error extracting chat info: {e}")
-                    continue
-            
-            return messages
-            
-        except Exception as e:
-            logger.error(f"Error getting unread messages from filtered list: {e}")
+    async def get_contact_chat_list(self, contact_name: str) -> List[Dict[str, Any]]:
+        """
+        Get chat list for a specific contact.
+        """
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+        
+        active_chat_result = await self.get_target_contact_chat_active(contact_name)
+        if not active_chat_result["success"]:
             return []
-    
-    async def _find_and_click_first_unread_chat(self) -> bool:
-        """
-        Find and click the first chat with unread messages.
         
-        Returns:
-            True if successfully clicked, False otherwise
-        """
-        try:
-            # Find the first chat item with unread messages
-            first_chat_with_unread = await self.page.query_selector('[role="listitem"]:has([aria-label*="未读消息"]), [role="listitem"]:has([aria-label*="unread message"])')
-            
-            if first_chat_with_unread:
-                # Find the clickable button within the chat item
-                chat_button = await first_chat_with_unread.query_selector('[role="button"]')
-                
-                if chat_button:
-                    await chat_button.click()
-                    return True
-                else:
-                    # If no button found, try clicking the chat item directly
-                    await first_chat_with_unread.click()
-                    return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error finding and clicking first unread chat: {e}")
-            return False
-    
+        return await self.get_chat_messages()
+        
     async def get_chat_messages(self) -> List[Dict[str, Any]]:
         """
         Get structured chat messages from current chat conversation.
@@ -735,51 +568,9 @@ class WhatsAppBrowserClient:
         logger.info(f"Attempting to send message to contact: {target_contact}")
         
         try:
-            # Step 1: Check if current conversation is the target user
-            current_contact_name = await self._get_current_chat_contact_name()
-            contact_info = None
-            
-            # If current chat matches target, use current chat
-            if current_contact_name and self._is_contact_match(current_contact_name, target_contact):
-                logger.info(f"Target contact is already in current chat: {current_contact_name}")
-                result["method_used"] = "current_chat"
-                contact_info = {"name": current_contact_name, "element": None}  # No need to click
-            else:
-                # Step 2: Try to find contact in chat list
-                contact_info = await self._find_contact_in_chat_list(target_contact)
-                if contact_info:
-                    logger.info(f"Found contact in chat list: {contact_info['name']}")
-                    result["method_used"] = "chat_list"
-                else:
-                    # Step 3: Search for contact
-                    search_result = await self._search_and_select_contact(target_contact)
-                    if search_result["success"]:
-                        logger.info(f"Found contact through search: {search_result['contact_name']}")
-                        result["method_used"] = "search"
-                        # After search, the contact should be selected, no need to click again
-                        contact_info = {"name": search_result["contact_name"], "element": None}
-                    else:
-                        result["error"] = search_result["error"]
-                        logger.error(result["error"])
-                        return result
-            
-            if not contact_info:
-                result["error"] = "Contact not found in chat list or search results"
-                logger.error(result["error"])
-                return result
-            
-            # Only click if we need to switch chats (not already in target chat)
-            if contact_info["element"] is not None:
-                click_success = await self._click_chat_contact(contact_info)
-                if not click_success:
-                    result["error"] = "Failed to click on contact"
-                    logger.error(result["error"])
-                    return result
-            
-            current_contact_name = await self._get_current_chat_contact_name()
-            if not current_contact_name or not self._is_contact_match(current_contact_name, target_contact):
-                result["error"] = "Current chat is not the target contact"
-                logger.error(result["error"])
+            active_chat_result = await self.get_target_contact_chat_active(contact_name)
+            if not active_chat_result["success"]:
+                result["error"] = active_chat_result["error"]
                 return result
 
             await self.page.wait_for_timeout(random.randint(500, 1500))
@@ -1043,7 +834,7 @@ class WhatsAppBrowserClient:
             
             if not chat_contact:
                 # Clear search before returning
-                await self._clear_search()
+                await self.human_like_input(search_input, '', clear_first=True, press_enter=False)
                 result["error"] = f"No search results found for '{target_contact}'"
                 return result
             
@@ -1056,7 +847,8 @@ class WhatsAppBrowserClient:
                 logger.info(f"Successfully selected contact from search: {chat_contact['name']}")
             else:
                 result["error"] = "Failed to click on search result"
-            
+
+            await self.human_like_input(search_input, '', clear_first=True, press_enter=False)
             return result
             
         except Exception as e:
@@ -1108,38 +900,12 @@ class WhatsAppBrowserClient:
             
             logger.info(f"Successfully clicked on search result: {result_info['name']}")
             
-            # Clear the search after successful selection
-            await self._clear_search()
-            
             return True
             
         except Exception as e:
             logger.error(f"Error clicking search result: {e}")
             return False
-
-    async def _clear_search(self):
-        """Clear the search input field based on HTML structure."""
-        try:
-            # Look for cancel search button first (from HTML structure)
-            cancel_selectors = [
-                '[aria-label="取消搜索"]',
-                '[aria-label="Cancel search"]',
-            ]
-            
-            for selector in cancel_selectors:
-                try:
-                    cancel_button = await self.page.query_selector(selector)
-                    if cancel_button:
-                        await cancel_button.click()
-                        await self.page.wait_for_timeout(500)
-                        logger.debug(f"Cleared search using cancel button: {selector}")
-                        return
-                except:
-                    continue
-            
-        except Exception as e:
-            logger.warning(f"Error clearing search: {e}")
-
+  
     async def _send_message_to_current_chat(self, message: str) -> Dict[str, Any]:
         """
         Send a message in the current WhatsApp chat by typing in the input field and pressing Enter.
@@ -1338,6 +1104,9 @@ class WhatsAppBrowserClient:
                 await self.page.keyboard.press('Backspace')
                 await self.page.wait_for_timeout(random.randint(100, 200))
             
+            if text.strip() == '':
+                return True
+
             # 逐字符输入，模拟人类打字习惯
             for i, char in enumerate(text.strip()):
                 # 输入当前字符
@@ -1373,6 +1142,109 @@ class WhatsAppBrowserClient:
         except Exception as e:
             logger.error(f"Error in human_like_input: {e}")
             return False
+
+    async def get_unread_messages(self) -> List[Dict[str, Any]]:
+        """
+        Get unread contact messages, excluding muted conversations.
+        
+        Returns:
+            List of unread message dictionaries with structure:
+            [
+                {
+                    "contact_name": "contact name",
+                    "unread_count": "number of unread messages",
+                    "last_message_preview": "preview of last message",
+                    "timestamp": "ISO format timestamp",
+                    "is_muted": False,
+                }
+            ]
+        """
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+        
+        unread_messages = []
+        
+        try:
+            # Wait for chat list to be visible
+            await self.page.wait_for_selector('[aria-label="对话列表"], [aria-label="Chat list"]', timeout=5000)
+            
+            # Find all chat items in the list
+            chat_items = await self.page.query_selector_all('[role="listitem"]')
+            
+            unread_items = await self.page.query_selector_all('[aria-label*="未读消息"], [aria-label*="unread message"]')
+            
+            if not unread_items:
+                return unread_messages
+            
+            for unread_indicator in unread_items:
+                try:
+                    # Check if this conversation is muted
+                    muted_indicator = await unread_indicator.query_selector('[aria-label="已静音的对话"], [aria-label*="muted"]')
+                    
+                    if muted_indicator:
+                        logger.debug("Skipping muted conversation")
+                        continue  # Skip muted conversations
+                    
+                    # Extract unread count from aria-label
+                    aria_label = await unread_indicator.get_attribute('aria-label')
+                    unread_count = "1"  # Default to 1 if can't parse
+                    if aria_label:
+                        count_match = re.search(r'(\d+)', aria_label)
+                        if count_match:
+                            unread_count = count_match.group(1)
+                    
+                    # Find the parent listitem that contains this unread indicator
+                    chat_item = await unread_indicator.evaluate_handle('''
+                        (element) => {
+                            let current = element;
+                            while (current && current.parentElement) {
+                                current = current.parentElement;
+                                if (current.getAttribute('role') === 'listitem') {
+                                    return current;
+                                }
+                            }
+                            return null;
+                        }
+                    ''')
+                    
+                    if not chat_item:
+                        logger.warning("Could not find parent listitem for unread indicator")
+                        continue
+                    
+                    # Get contact name from title attribute or text content
+                    contact_name = "Unknown"
+                    
+                    name_elements = await chat_item.query_selector_all('span[dir="auto"]')
+                    for name_elem in name_elements:
+                        text = await name_elem.text_content()
+                        if text and text.strip() and not re.match(r'^\d{1,2}:\d{2}$', text.strip()):
+                            contact_name = text.strip()
+                            break
+                    
+                    # Look for message preview in the message area
+                    message_preview_container = await chat_item.text_content()
+                  
+                    # Create unread message entry
+                    unread_entry = {
+                        "contact_name": contact_name,
+                        "unread_count": unread_count,
+                        "message_preview_container": message_preview_container,
+                        "is_muted": False,  # We already filtered out muted ones
+                    }
+                    
+                    unread_messages.append(unread_entry)
+                    logger.info(f"Found unread message from {contact_name}: {unread_count} messages")
+                    
+                except Exception as e:
+                    logger.warning(f"Error extracting chat info from item: {e}")
+                    continue
+            
+            logger.info(f"Found {len(unread_messages)} unread conversations (excluding muted)")
+            return unread_messages
+            
+        except Exception as e:
+            logger.error(f"Error getting unread contact messages: {e}")
+            return []
 
 
 class WhatsAppMonitor:
