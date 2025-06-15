@@ -29,6 +29,15 @@ services:
         - path: src/memory/
           action: sync+restart
           target: /app/memory/
+        - path: src/tools/
+          action: sync+restart
+          target: /app/tools/
+        - path: src/brain/
+          action: sync+restart
+          target: /app/brain/
+        - path: src/tasks/
+          action: sync+restart
+          target: /app/tasks/
 
   streamlit_app:
     build:
