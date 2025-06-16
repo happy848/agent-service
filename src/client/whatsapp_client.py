@@ -3,7 +3,6 @@ Browser client for WhatsApp Web screenshot capture using Playwright.
 所有操作必须模拟真人操作，随机的停顿，鼠标位置的移动和点击
 每次点击的时候鼠标先移动到该位置，然后点击，记录当前位置，下次点击的时候这个位置作为移动的起始位置
 鼠标移动的曲线模拟人类正常使用Windows 浏览器的移动曲线，同时加上随机时间
-```
 """
 
 import asyncio
@@ -15,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
 from enum import Enum
+from functools import wraps
 
 from client.browser_client import BrowserManager
 
@@ -59,6 +59,33 @@ class MonitorTask:
         self.last_execution = None
         self.execution_count = 0
         self.error_count = 0
+
+
+def screenshot_state_recorder(func):
+    """
+    装饰器：在方法执行前后记录屏幕截图
+    """
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        method_name = func.__name__
+        try:
+            # 执行前截图
+            await self.take_screenshot(f"{method_name}_before")
+            
+            # 执行方法
+            result = await func(self, *args, **kwargs)
+            
+            # 执行后截图
+            await self.take_screenshot(f"{method_name}_after")
+            
+            return result
+            
+        except Exception as e:
+            # 发生异常时也记录截图
+            await self.take_screenshot(f"{method_name}_error")
+            raise e
+            
+    return wrapper
 
 
 class WhatsAppBrowserClient:
@@ -131,8 +158,8 @@ class WhatsAppBrowserClient:
         await self.page.wait_for_timeout(5000)
 
         # Auto start monitoring if enabled
-        if self.auto_start_monitoring:
-            await self._start_monitoring()
+        # if self.auto_start_monitoring:
+        #     await self._start_monitoring()
         
     async def close(self):
         """Close the browser and cleanup."""
@@ -150,14 +177,13 @@ class WhatsAppBrowserClient:
         
         await self.browser_manager.close()
 
-    async def _start_monitoring(self):
-        """Start monitoring tasks in background."""
-        if self.monitor is None:
-            self.monitor = WhatsAppMonitor(self, self.monitor_interval)
-        
-        # Start monitoring in background task
-        self._monitoring_task = asyncio.create_task(self.monitor.start_monitoring())
-        logger.info(f"Started WhatsApp monitoring with {self.monitor_interval}s interval")
+    # async def _start_monitoring(self):
+    #     """Start monitoring tasks in background."""
+    #     if self.monitor is None:
+    #         self.monitor = WhatsAppMonitor(self, self.monitor_interval)
+    #     # Start monitoring in background task
+    #     self._monitoring_task = asyncio.create_task(self.monitor.start_monitoring())
+    #     logger.info(f"Started WhatsApp monitoring with {self.monitor_interval}s interval")
     
     def stop_monitoring(self):
         """Stop the monitoring tasks."""
@@ -201,7 +227,7 @@ class WhatsAppBrowserClient:
         # Generate filename with UTC+8 timestamp in readable format
         utc_plus_8 = timezone(timedelta(hours=8))
         timestamp = datetime.now(utc_plus_8).strftime("%Y-%m-%d %H:%M:%S")
-        filename = f"{filename_prefix}_{timestamp}.png"
+        filename = f"wa_{timestamp}_{filename_prefix}.png"
         filepath = images_dir / filename
         
         # Take screenshot
@@ -354,6 +380,7 @@ class WhatsAppBrowserClient:
             
         return result
         
+    @screenshot_state_recorder
     async def get_contact_chat_list(self, contact_name: str) -> List[Dict[str, Any]]:
         """
         Get chat list for a specific contact.
@@ -505,6 +532,7 @@ class WhatsAppBrowserClient:
             logger.warning(f"Error parsing message element: {e}")
             return None
 
+    @screenshot_state_recorder
     async def send_message_to_contact(self, contact_name: str, message: str) -> Dict[str, Any]:
         """
         Send a message to a specific contact.
@@ -1153,6 +1181,7 @@ class WhatsAppBrowserClient:
             logger.error(f"Error in human_like_input: {e}")
             return False
 
+    @screenshot_state_recorder
     async def get_unread_messages(self) -> List[Dict[str, Any]]:
         """
         Get unread contact messages, excluding muted conversations.
@@ -1272,11 +1301,11 @@ class WhatsAppMonitor:
     def _register_default_tasks(self):
         """Register default monitoring tasks"""
         # Screenshot task
-        self.add_task(
-            TaskType.SCREENSHOT,
-            self.whatsapp_client.take_screenshot,
-            "screenshot_task",
-        )
+        # self.add_task(
+        #     TaskType.SCREENSHOT,
+        #     self.whatsapp_client.take_screenshot,
+        #     "screenshot_task",
+        # )
         
         # Message check task
         # self.add_task(
