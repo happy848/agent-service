@@ -49,6 +49,7 @@ dependencies = [
     "tiktoken >=0.8.0",
     "uvicorn ~=0.32.1",
     "playwright>=1.52.0",
+    "pytz>=2025.2",
 ]
 
 [dependency-groups]

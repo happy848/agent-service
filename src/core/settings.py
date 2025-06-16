@@ -110,6 +110,15 @@ class Settings(BaseSettings):
         default_factory=dict, description="Map of model names to Azure deployment IDs"
     )
 
+    # 时区设置
+    TIMEZONE: str = "Asia/Shanghai"
+    
+    # 数据库配置
+    DATABASE_URL: str = "postgresql+asyncpg://user:password@localhost:5432/dbname"
+    DB_ECHO_LOG: bool = False
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+
     def model_post_init(self, __context: Any) -> None:
         api_keys = {
             Provider.OPENAI: self.OPENAI_API_KEY,
