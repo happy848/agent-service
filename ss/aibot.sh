@@ -219,6 +219,11 @@ Docker AI Agent Service 启动脚本
   test            测试服务接口（请求 8080/test）
   help            显示帮助信息
 
+WhatsApp命令:
+  unread          查看所有未读消息
+  chat <contact>  获取指定联系人的聊天记录
+  send <contact> <message>  发送消息给指定联系人
+
 快速开始:
   1. $0 start     # 首次启动
   2. 访问 http://localhost:8501
@@ -270,6 +275,29 @@ main() {
             ;;
         test)
             test_service
+            ;;
+        unread)
+            curl -s http://localhost:8080/whatsapp/unread_messages | jq '.'
+            ;;
+        chat)
+            if [ -z "$2" ]; then
+                log_error "请提供联系人名称"
+                echo "用法: $0 chat <contact>"
+                exit 1
+            fi
+            curl -X POST http://localhost:8080/whatsapp/contact_chat_list \
+                -H "Content-Type: application/json" \
+                -d "{\"contact_name\": \"$2\"}" | jq '.'
+            ;;
+        send)
+            if [ -z "$2" ] || [ -z "$3" ]; then
+                log_error "请提供联系人名称和消息内容"
+                echo "用法: $0 send <contact> <message>"
+                exit 1
+            fi
+            curl -X POST http://localhost:8080/whatsapp/send_message \
+                -H "Content-Type: application/json" \
+                -d "{\"contact_name\": \"$2\", \"message\": \"$3\"}" | jq '.'
             ;;
         help|--help|-h)
             show_help
