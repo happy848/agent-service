@@ -20,9 +20,15 @@ COPY uv.lock .
 RUN pip install --no-cache-dir uv
 RUN uv sync --frozen --no-install-project --no-dev
 
-# Install Playwright and browsers
-RUN pip install playwright
+# Install specific version of Playwright and browsers
+RUN pip install playwright==1.52
+# chromium@136.0.7103.25
 RUN playwright install --with-deps chromium
+# Add version information to a file for easy checking
+RUN echo "Playwright Version: $(pip show playwright | grep Version)" > /opt/browser_versions.txt && \
+    python3 -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); browser = p.chromium.launch(); print(f'Chromium Version: {browser.version}', flush=True); browser.close(); p.stop()" >> /opt/browser_versions.txt
+
+# docker run --rm agent-service-base:latest cat /opt/browser_versions.txt
 
 # Clean up
 RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* 
