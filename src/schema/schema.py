@@ -175,7 +175,7 @@ class WhatsAppContactInput(BaseModel):
 
     contact_name: str = Field(
         description="WhatsApp contact name or phone number.",
-        examples=["f.matheoprod@gmail.com", "+33 7 75 81 26 36"],
+        examples=["support@gmail.com", "+33 123 456 789"],
     )
 
 
@@ -184,7 +184,7 @@ class WhatsAppMessageInput(BaseModel):
 
     contact_name: str = Field(
         description="WhatsApp contact name or phone number.",
-        examples=["f.matheoprod@gmail.com", "+33 7 75 81 26 36"],
+        examples=["support@gmail.com", "+33 123 456 789"],
     )
     message: str = Field(
         description="Message content to send.",

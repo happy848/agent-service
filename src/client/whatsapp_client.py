@@ -12,9 +12,11 @@ import random
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any, List, Tuple
+from typing import Optional, Callable, Dict, Any, List, Tuple, Literal
 from enum import Enum
 from functools import wraps
+from pydantic import BaseModel, Field
+from uuid import uuid4
 
 from client.browser_client import BrowserManager
 from agents import get_agent
@@ -25,7 +27,7 @@ from playwright.async_api import Page
 
 # Configure logger
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 # Add console handler if not already present
 if not logger.handlers:
@@ -34,6 +36,13 @@ if not logger.handlers:
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+
+class MessageItem(BaseModel):
+    type: Literal["received", "sent"] = Field(description="Type of the message.")
+    sender: str = Field(description="Sender of the message.")
+    content: str = Field(description="Content of the message.")
+    datetime: str = Field(description="Datetime of the message.")
+    timestamp: str = Field(description="Timestamp of the message.")
 
 class TaskType(Enum):
     """Task type enumeration"""
@@ -76,9 +85,6 @@ def screenshot_state_recorder(func):
     async def wrapper(self, *args, **kwargs):
         method_name = func.__name__
         try:
-            # 执行前截图
-            await self.take_screenshot(f"{method_name}_before")
-            
             # 执行方法
             result = await func(self, *args, **kwargs)
             
@@ -122,7 +128,7 @@ class WhatsAppBrowserClient:
         self._skip_continue_check = False
         
         # 添加当前对话联系人的最新消息缓存
-        self._current_chat_info: Optional[Dict[str, Any]] = None
+        self._current_chat_info: Optional[MessageItem] = None
         
     async def __aenter__(self):
         """Async context manager entry."""
@@ -143,14 +149,10 @@ class WhatsAppBrowserClient:
         
         await self.goto_whatsapp_web()
         
-        await self.page.wait_for_timeout(5000)
-        
+        await self.page.wait_for_timeout(3000)
         await self.take_screenshot("wa_start_after")
-        
-        unread_contact_messages = await self.get_unread_messages()
-        
-        logger.info(f"Unread contact messages: {unread_contact_messages}")
-        
+        # Removed redundant unread messages check since monitor will handle this
+        logger.info("WhatsApp client started successfully")
         
     async def goto_whatsapp_web(self):
         """Navigate to WhatsApp Web."""
@@ -214,13 +216,10 @@ class WhatsAppBrowserClient:
         def handle_monitoring_done(task):
             try:
                 task.result()
-            except asyncio.CancelledError:
-                logger.info("WhatsApp monitoring was cancelled")
             except Exception as e:
-                logger.error(f"WhatsApp monitoring failed with error: {e}")
+                logger.error(f"WhatsApp monitoring failed with error: {e}", exc_info=True)
                 
         self._monitoring_task.add_done_callback(handle_monitoring_done)
-        logger.info(f"Started WhatsApp monitoring with {self.monitor_interval}s interval")
     
     def stop_monitoring(self):
         """Stop the monitoring tasks."""
@@ -236,7 +235,7 @@ class WhatsAppBrowserClient:
             return self.monitor.get_status()
         return {'is_running': False, 'monitor_exists': False}
         
-    async def check_unread_messages(self) -> List[Dict[str, Any]]:
+    async def check_unread_messages(self) -> List[MessageItem]:
         """Check new messages"""
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
@@ -244,7 +243,7 @@ class WhatsAppBrowserClient:
         unread_contact_messages = await self.get_unread_messages()
         
         for contact_message in unread_contact_messages:
-            if can_auto_replay_contact_message(contact_message['contact_name']):
+            if can_auto_replay_contact_message(contact_message.sender):
                 # Use the new customer service agent to handle messages
                 reply = await self.handle_customer_message(contact_message)
                 if reply['success']:
@@ -254,7 +253,7 @@ class WhatsAppBrowserClient:
                         messages_to_send = [messages_to_send]
                     
                     for message in messages_to_send:
-                        await self.send_message_to_contact(contact_message['contact_name'], message)
+                        await self.send_message_to_contact(contact_message.sender, message)
                         # Add a small delay between messages
                         await self.page.wait_for_timeout(random.randint(500, 1500))
                 else:
@@ -264,7 +263,7 @@ class WhatsAppBrowserClient:
 
         return unread_contact_messages
             
-    async def take_screenshot(self, filename_prefix: str = "wa") -> str:
+    async def take_screenshot(self, filename_prefix: str = "") -> str:
         """Take a screenshot and save it with timestamp."""
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
@@ -273,16 +272,20 @@ class WhatsAppBrowserClient:
         images_dir = Path("/app/docker/logs")
         images_dir.mkdir(exist_ok=True)
         
-        # Generate filename with UTC+8 timestamp in readable format
+        # Generate filename with UTC+8 timestamp in reverse chronological format
         utc_plus_8 = timezone(timedelta(hours=8))
-        timestamp = datetime.now(utc_plus_8).strftime("%Y-%m-%d %H:%M:%S")
-        filename = f"wa_{timestamp}_{filename_prefix}.png"
+        current_time = datetime.now(utc_plus_8)
+        # Use a shorter reverse timestamp format (YYYYMMDDHHMMSS)
+        reverse_timestamp = f"{99999999999999 - int(current_time.strftime('%Y%m%d%H%M%S'))}"
+        filename = f"{reverse_timestamp}_{filename_prefix}.png"  # Changed extension to .png
         filepath = images_dir / filename
         
-        # Take screenshot
-        await self.page.screenshot(path=str(filepath), full_page=True)
-        
-        logger.info(f"Screenshot saved: {filepath}")
+        # Take screenshot with PNG format
+        await self.page.screenshot(
+            path=str(filepath),
+            full_page=True,
+            type='png'
+        )
         
         # Clean up old screenshots (delete files older than 10 minutes)
         await self._cleanup_old_screenshots(images_dir, filename_prefix)
@@ -443,21 +446,12 @@ class WhatsAppBrowserClient:
         
         return await self.get_chat_messages()
         
-    async def get_chat_messages(self) -> List[Dict[str, Any]]:
+    async def get_chat_messages(self) -> List[MessageItem]:
         """
         Get structured chat messages from current chat conversation.
         
         Returns:
-            List of message dictionaries with structure:
-            [
-                {
-                    "type": "received" or "sent",
-                    "sender": "contact_name or phone",
-                    "content": "message content",
-                    "datetime": "HH:MM, YYYY-MM-DD",
-                    "timestamp": "ISO format timestamp"
-                }
-            ]
+            List of MessageItem objects containing chat messages
         """
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
@@ -466,7 +460,7 @@ class WhatsAppBrowserClient:
             # Wait for chat messages to load
             await self.page.wait_for_selector('#main', timeout=3000)
             
-            messages = []
+            messages: List[MessageItem] = []
             
             # Get all message elements (both incoming and outgoing)
             message_elements = await self.page.query_selector_all('#main [role="row"] .message-in, #main [role="row"] .message-out')
@@ -487,7 +481,7 @@ class WhatsAppBrowserClient:
             logger.error(f"Error getting chat messages: {e}")
             return []
     
-    async def _parse_message_element(self, element) -> Optional[Dict[str, Any]]:
+    async def _parse_message_element(self, element) -> Optional[MessageItem]:
         """
         Parse individual message element to extract message data.
         
@@ -495,7 +489,7 @@ class WhatsAppBrowserClient:
             element: Playwright element for message
             
         Returns:
-            Dictionary with message data or None if parsing fails
+            MessageItem object if parsing succeeds, None otherwise
         """
         try:
             # Determine message type based on class
@@ -542,7 +536,8 @@ class WhatsAppBrowserClient:
             
             # Get datetime
             datetime_str = ""
-            timestamp = datetime.now().isoformat()
+            current_time = datetime.now(timezone(timedelta(hours=8)))
+            timestamp = current_time.isoformat()
             
             # Try to extract datetime from data-pre-plain-text
             pre_text_element = await element.query_selector('[data-pre-plain-text]')
@@ -561,7 +556,7 @@ class WhatsAppBrowserClient:
                     time_text = await time_elem.text_content()
                     if time_text and re.match(r'^\d{1,2}:\d{2}$', time_text.strip()):
                         # Add current date if only time is available
-                        current_date = datetime.now().strftime("%Y-%m-%d")
+                        current_date = current_time.strftime("%Y-%m-%d")
                         datetime_str = f"{time_text.strip()}, {current_date}"
                         break
             
@@ -569,13 +564,13 @@ class WhatsAppBrowserClient:
             if not content:
                 return None
             
-            return {
-                "type": message_type,
-                "sender": sender,
-                "content": content,
-                "datetime": datetime_str,
-                "timestamp": timestamp
-            }
+            return MessageItem(
+                type=message_type,
+                sender=sender,
+                content=content,
+                datetime=datetime_str or current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                timestamp=timestamp
+            )
             
         except Exception as e:
             logger.warning(f"Error parsing message element: {e}")
@@ -699,18 +694,12 @@ class WhatsAppBrowserClient:
             logger.error(f"Error getting current chat contact name: {e}")
             return None
 
-    async def _get_current_chat_last_message(self) -> Optional[Dict[str, Any]]:
+    async def _get_current_chat_last_message(self) -> Optional[MessageItem]:
         """
         获取当前对话的最新消息信息
         
         Returns:
-            Dict with message info if found:
-            {
-                "contact_name": str,
-                "last_message": str,
-                "timestamp": str
-            }
-            None if not found
+            MessageItem object if found, None otherwise
         """
         try:
             # 获取当前对话联系人名称
@@ -723,14 +712,21 @@ class WhatsAppBrowserClient:
             if not messages:
                 return None
                 
-            # 获取最新的消息
-            last_message = messages[-1]
+            # Find last received message
+            last_received_message = None
+            for message in reversed(messages):
+                if message.type == "received":
+                    current_time = datetime.now(timezone(timedelta(hours=8)))
+                    last_received_message = MessageItem(
+                        type="received",
+                        sender=message.sender,
+                        content=message.content,
+                        datetime=message.datetime or current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        timestamp=message.timestamp or current_time.isoformat()
+                    )
+                    break
             
-            return {
-                "contact_name": current_contact,
-                "last_message": last_message["content"],
-                "timestamp": last_message["timestamp"]
-            }
+            return last_received_message
             
         except Exception as e:
             logger.error(f"Error getting current chat last message: {e}")
@@ -1137,23 +1133,21 @@ class WhatsAppBrowserClient:
             logs_dir.mkdir(exist_ok=True)
             # Generate filename with timestamp
             utc_plus_8 = timezone(timedelta(hours=8))
-            timestamp = datetime.now(utc_plus_8).strftime("%Y-%m-%d_%H-%M-%S")
-
-            html_content = await self.page.html()
-            
-            # Save HTML file
-            html_filename = f"whatsapp_debug_{timestamp}.html"
-            html_filepath = logs_dir / html_filename
+            current_time = datetime.now(utc_plus_8)
+            # Use a shorter reverse timestamp format (YYYYMMDDHHMMSS)
+            reverse_timestamp = f"{99999999999999 - int(current_time.strftime('%Y%m%d%H%M%S'))}"
+            filename = f"{reverse_timestamp}_wa_conversation_list_raw.html"
+            html_filepath = logs_dir / filename
             
             with open(html_filepath, 'w', encoding='utf-8') as f:
-                f.write(html_content)
+                f.write(await self.page.html())
             
             logger.info(f"Saved conversation HTML debug file: {html_filepath}")
             
             await self._cleanup_old_debug_files(logs_dir)
             
         except Exception as e:
-            logger.error(f"Error saving conversation HTML to log: {e}")
+            logger.error(f"Error saving conversation HTML to log: {e}", exc_info=True)
     
     async def _cleanup_old_debug_files(self, logs_dir: Path):
         """Clean up debug HTML files older than 1 hour."""
@@ -1267,28 +1261,18 @@ class WhatsAppBrowserClient:
             logger.error(f"Error in human_like_input: {e}")
             return False
 
-    @screenshot_state_recorder
-    async def get_unread_messages(self) -> List[Dict[str, Any]]:
+    async def get_unread_messages(self) -> List[MessageItem]:
         """
         Get unread contact messages, excluding muted conversations.
         Also tracks and compares the current chat contact's last message.
         
         Returns:
-            List of unread message dictionaries with structure:
-            [
-                {
-                    "contact_name": "contact name",
-                    "unread_count": "number of unread messages",
-                    "last_message_preview": "preview of last message",
-                    "timestamp": "ISO format timestamp",
-                    "is_muted": False,
-                }
-            ]
+            List of MessageItem objects containing unread messages
         """
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
         
-        unread_messages = []
+        unread_messages: List[MessageItem] = []
         
         try:
             await self.goto_whatsapp_web()
@@ -1299,16 +1283,10 @@ class WhatsAppBrowserClient:
             # 如果有当前对话信息，检查是否有新消息
             if current_chat_info and self._current_chat_info:
                 # 只有当联系人相同时才进行比较
-                if current_chat_info["contact_name"] == self._current_chat_info["contact_name"]:
+                if current_chat_info.sender == self._current_chat_info.sender:
                     # 如果最新消息不同，说明有新消息
-                    if current_chat_info["last_message"] != self._current_chat_info["last_message"]:
-                        unread_messages.append({
-                            "contact_name": current_chat_info["contact_name"],
-                            "unread_count": "1",  # 由于是实时检测，设为1
-                            "message_preview_container": current_chat_info["last_message"],
-                            "is_muted": False,
-                            "timestamp": current_chat_info["timestamp"]
-                        })
+                    if current_chat_info.content != self._current_chat_info.content:
+                        unread_messages.append(current_chat_info)
             
             # 更新当前对话信息缓存
             self._current_chat_info = current_chat_info
@@ -1368,15 +1346,17 @@ class WhatsAppBrowserClient:
                     
                     # Look for message preview in the message area
                     message_preview_container = await chat_item.text_content()
-                  
-                    # Create unread message entry
-                    unread_entry = {
-                        "contact_name": contact_name,
-                        "unread_count": unread_count,
-                        "message_preview_container": message_preview_container,
-                        "is_muted": False,  # We already filtered out muted ones
-                        "timestamp": datetime.now().isoformat()
-                    }
+                    
+                    current_time = datetime.now(timezone(timedelta(hours=8)))
+                    
+                    # Create unread message entry using MessageItem model
+                    unread_entry = MessageItem(
+                        type="received",
+                        sender=contact_name,
+                        content=message_preview_container,
+                        datetime=current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        timestamp=current_time.isoformat()
+                    )
                     
                     unread_messages.append(unread_entry)
                     logger.info(f"Found unread message from {contact_name}: {unread_count} messages")
@@ -1392,7 +1372,7 @@ class WhatsAppBrowserClient:
             logger.error(f"Error getting unread contact messages: {e}")
             return []
 
-    async def handle_customer_message(self, message_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def handle_customer_message(self, message_data: MessageItem) -> Dict[str, Any]:
         """
         Handle a customer message using the customer service agent.
         
@@ -1409,27 +1389,60 @@ class WhatsAppBrowserClient:
         """
         try:
             # Get chat history for the contact
-            chat_messages = await self.get_contact_chat_list(message_data['contact_name'])
+            chat_messages = await self.get_contact_chat_list(message_data.sender)
+            
+            # Filter messages from the last 3 days
+            current_time = datetime.now(timezone(timedelta(hours=8)))
+            three_days_ago = current_time - timedelta(days=3)
+            
+            # Convert chat messages datetime strings to datetime objects and filter by date
+            filtered_messages = []
+            for msg in chat_messages:
+                try:
+                    # Parse the datetime string to a datetime object
+                    msg_datetime = datetime.strptime(msg.datetime, '%Y-%m-%d %H:%M:%S')
+                    msg_datetime = msg_datetime.replace(tzinfo=timezone(timedelta(hours=8)))
+                    if msg_datetime >= three_days_ago:
+                        filtered_messages.append(msg)
+                except ValueError:
+                    # If datetime parsing fails, include the message anyway
+                    filtered_messages.append(msg)
+            
+            # Get messages until we find the 4th sent message from the end
+            sent_count = 0
+            conversation_messages = []
+            
+            # Iterate through messages in reverse order
+            for msg in reversed(filtered_messages):
+                conversation_messages.insert(0, msg)  # Add message to the beginning to maintain order
+                if msg.type == 'sent':
+                    sent_count += 1
+                    if sent_count >= 4:  # Stop when we find the 4th sent message
+                        conversation_messages = conversation_messages[:-1]
+                        break
+            
+            # Use these filtered messages for the conversation
+            filtered_messages = conversation_messages
             
             # Convert chat history to messages
             messages = []
             
             # Add system message with chat context
-            context = f"""This is a conversation with {message_data['contact_name']}.
+            context = f"""This is a conversation with {message_data.sender}.
             Previous messages are shown below with their timestamps.
-            The current time is {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}."""
+            The current time is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."""
             messages.append(SystemMessage(content=context))
             
             # Add chat history messages
-            for msg in chat_messages:
-                content = f"[{msg['datetime']}] {msg['content']}"
-                if msg['type'] == 'received':
+            for msg in filtered_messages:
+                content = f"[{msg.datetime}] {msg.content}"
+                if msg.type == 'received':
                     messages.append(HumanMessage(content=content))
                 else:
                     messages.append(AIMessage(content=content))
             
             # Add the current message if it's not in chat history
-            current_msg = f"[{datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}] {message_data['message_preview_container']}"
+            current_msg = f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] {message_data.content}"
             messages.append(HumanMessage(content=current_msg))
             
             # Initialize agent state
@@ -1437,10 +1450,20 @@ class WhatsAppBrowserClient:
                 "messages": messages
             }
             
+            logger.debug(f"Agent state: {agent_state}")
+            
             # Run the agent
             result = await self.customer_service_agent.ainvoke(
-                agent_state
+                agent_state,
+                config={
+                    "configurable": {
+                        "thread_id": str(message_data.sender),
+                        "checkpoint_ns": "whatsapp",
+                        "checkpoint_id": str(message_data.sender)
+                    }
+                }
             )
+            logger.debug(f"Agent result: {result}")
             
             # Extract and split the response
             if result and result.get("messages"):
@@ -1599,46 +1622,25 @@ class WhatsAppMonitor:
             return
             
         self.is_running = True
-        logger.info(f"Starting WhatsApp monitoring with {len(self.tasks)} tasks, interval: {self.interval_seconds}s")
-        
         # 显示任务列表
         enabled_tasks = [name for name, task in self.tasks.items() if task.enabled]
         logger.info(f"Enabled tasks: {', '.join(enabled_tasks)}")
-        
         try:
             while self.is_running:
                 cycle_start = datetime.now()
                 
                 # 执行所有任务
                 results = await self._execute_tasks()
-                summary = results.get('_execution_summary', {})
-                
-                logger.info(
-                    f"Monitor cycle completed: "
-                    f"{summary.get('tasks_executed', 0)} succeeded, "
-                    f"{summary.get('tasks_failed', 0)} failed, "
-                    f"took {summary.get('total_duration', 0):.2f}s"
-                )
-                
                 # 计算下次执行时间
                 execution_time = (datetime.now() - cycle_start).total_seconds()
-                
                 if execution_time < self.interval_seconds:
                     # 如果执行时间小于间隔时间，等待剩余时间
                     wait_time = self.interval_seconds - execution_time
-                    logger.debug(f"Waiting {wait_time:.2f}s until next cycle")
                     await asyncio.sleep(wait_time)
-                else:
-                    # 如果执行时间超过间隔时间，立即开始下一轮
-                    logger.warning(f"Task execution took {execution_time:.2f}s (longer than interval {self.interval_seconds}s)")
-                    
-        except KeyboardInterrupt:
-            logger.info("Monitor stopped by user")
         except Exception as e:
-            logger.error(f"Monitor error: {e}")
+            logger.error(f"Monitor error: {e}", exc_info=True)
         finally:
             self.is_running = False
-            logger.info("Monitor stopped")
     
     def stop_monitoring(self):
         """停止监控"""
