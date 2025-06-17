@@ -12,7 +12,7 @@ import random
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any, List
+from typing import Optional, Callable, Dict, Any, List, Tuple
 from enum import Enum
 from functools import wraps
 
@@ -101,7 +101,6 @@ class WhatsAppBrowserClient:
     def __init__(
         self, 
         headless: bool = True, 
-        auto_start_monitoring: bool = True, 
         monitor_interval: int = 10,
         user_data_dir: Optional[str] = None,
         profile_name: str = "whatsapp"
@@ -112,7 +111,6 @@ class WhatsAppBrowserClient:
             profile_name=profile_name
         )
         self.page: Optional[Page] = None
-        self.auto_start_monitoring = auto_start_monitoring
         self.monitor_interval = monitor_interval
         self.monitor: Optional['WhatsAppMonitor'] = None
         self._monitoring_task: Optional[asyncio.Task] = None
@@ -122,6 +120,9 @@ class WhatsAppBrowserClient:
         self._continue_check_attempts = 0
         self._max_continue_attempts = 3
         self._skip_continue_check = False
+        
+        # 添加当前对话联系人的最新消息缓存
+        self._current_chat_info: Optional[Dict[str, Any]] = None
         
     async def __aenter__(self):
         """Async context manager entry."""
@@ -139,6 +140,16 @@ class WhatsAppBrowserClient:
         
         # Create new page with anti-detection
         self.page = await self.browser_manager.new_page()
+        
+        await self.goto_whatsapp_web()
+        
+        await self.page.wait_for_timeout(5000)
+        
+        await self.take_screenshot("wa_start_after")
+        
+        unread_contact_messages = await self.get_unread_messages()
+        
+        logger.info(f"Unread contact messages: {unread_contact_messages}")
         
         
     async def goto_whatsapp_web(self):
@@ -165,9 +176,7 @@ class WhatsAppBrowserClient:
         
         await self.page.wait_for_timeout(5000)
 
-        # Auto start monitoring if enabled
-        # if self.auto_start_monitoring:
-        #     await self._start_monitoring()
+        await self._start_monitoring()
         
     async def close(self):
         """Close the browser and cleanup."""
@@ -185,13 +194,33 @@ class WhatsAppBrowserClient:
         
         await self.browser_manager.close()
 
-    # async def _start_monitoring(self):
-    #     """Start monitoring tasks in background."""
-    #     if self.monitor is None:
-    #         self.monitor = WhatsAppMonitor(self, self.monitor_interval)
-    #     # Start monitoring in background task
-    #     self._monitoring_task = asyncio.create_task(self.monitor.start_monitoring())
-    #     logger.info(f"Started WhatsApp monitoring with {self.monitor_interval}s interval")
+    async def _start_monitoring(self):
+        """Start monitoring tasks in background."""
+        if self.monitor is None:
+            self.monitor = WhatsAppMonitor(self, self.monitor_interval)
+            
+        # Cancel existing monitoring task if running
+        if self._monitoring_task and not self._monitoring_task.done():
+            self._monitoring_task.cancel()
+            try:
+                await self._monitoring_task
+            except asyncio.CancelledError:
+                pass
+            
+        # Start monitoring in background task
+        self._monitoring_task = asyncio.create_task(self.monitor.start_monitoring())
+        
+        # Add error handling for the background task
+        def handle_monitoring_done(task):
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                logger.info("WhatsApp monitoring was cancelled")
+            except Exception as e:
+                logger.error(f"WhatsApp monitoring failed with error: {e}")
+                
+        self._monitoring_task.add_done_callback(handle_monitoring_done)
+        logger.info(f"Started WhatsApp monitoring with {self.monitor_interval}s interval")
     
     def stop_monitoring(self):
         """Stop the monitoring tasks."""
@@ -212,7 +241,7 @@ class WhatsAppBrowserClient:
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
         
-        unread_contact_messages = await self.get_unread_contact_message()
+        unread_contact_messages = await self.get_unread_messages()
         
         for contact_message in unread_contact_messages:
             if can_auto_replay_contact_message(contact_message['contact_name']):
@@ -668,6 +697,43 @@ class WhatsAppBrowserClient:
             
         except Exception as e:
             logger.error(f"Error getting current chat contact name: {e}")
+            return None
+
+    async def _get_current_chat_last_message(self) -> Optional[Dict[str, Any]]:
+        """
+        获取当前对话的最新消息信息
+        
+        Returns:
+            Dict with message info if found:
+            {
+                "contact_name": str,
+                "last_message": str,
+                "timestamp": str
+            }
+            None if not found
+        """
+        try:
+            # 获取当前对话联系人名称
+            current_contact = await self._get_current_chat_contact_name()
+            if not current_contact:
+                return None
+                
+            # 获取当前对话的消息列表
+            messages = await self.get_chat_messages()
+            if not messages:
+                return None
+                
+            # 获取最新的消息
+            last_message = messages[-1]
+            
+            return {
+                "contact_name": current_contact,
+                "last_message": last_message["content"],
+                "timestamp": last_message["timestamp"]
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting current chat last message: {e}")
             return None
 
     def _is_contact_match(self, current_contact: str, target_contact: str) -> bool:
@@ -1205,6 +1271,7 @@ class WhatsAppBrowserClient:
     async def get_unread_messages(self) -> List[Dict[str, Any]]:
         """
         Get unread contact messages, excluding muted conversations.
+        Also tracks and compares the current chat contact's last message.
         
         Returns:
             List of unread message dictionaries with structure:
@@ -1225,6 +1292,27 @@ class WhatsAppBrowserClient:
         
         try:
             await self.goto_whatsapp_web()
+            
+            # 获取当前对话的最新消息信息
+            current_chat_info = await self._get_current_chat_last_message()
+            
+            # 如果有当前对话信息，检查是否有新消息
+            if current_chat_info and self._current_chat_info:
+                # 只有当联系人相同时才进行比较
+                if current_chat_info["contact_name"] == self._current_chat_info["contact_name"]:
+                    # 如果最新消息不同，说明有新消息
+                    if current_chat_info["last_message"] != self._current_chat_info["last_message"]:
+                        unread_messages.append({
+                            "contact_name": current_chat_info["contact_name"],
+                            "unread_count": "1",  # 由于是实时检测，设为1
+                            "message_preview_container": current_chat_info["last_message"],
+                            "is_muted": False,
+                            "timestamp": current_chat_info["timestamp"]
+                        })
+            
+            # 更新当前对话信息缓存
+            self._current_chat_info = current_chat_info
+            
             # Wait for chat list to be visible
             await self.page.wait_for_selector('[aria-label="对话列表"], [aria-label="Chat list"]', timeout=5000)
             
@@ -1287,6 +1375,7 @@ class WhatsAppBrowserClient:
                         "unread_count": unread_count,
                         "message_preview_container": message_preview_container,
                         "is_muted": False,  # We already filtered out muted ones
+                        "timestamp": datetime.now().isoformat()
                     }
                     
                     unread_messages.append(unread_entry)
@@ -1320,27 +1409,27 @@ class WhatsAppBrowserClient:
         """
         try:
             # Get chat history for the contact
-            chat_history = message_data
+            chat_messages = await self.get_contact_chat_list(message_data['contact_name'])
             
             # Convert chat history to messages
             messages = []
-            for msg in chat_history:
-                # Add system message with chat context
-                if len(messages) == 0:
-                    context = f"""This is a conversation with {message_data['contact_name']}.
-                    Previous messages are shown below with their timestamps.
-                    The current time is {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}."""
-                    messages.append(SystemMessage(content=context))
-                
-                # Convert each message to appropriate format
+            
+            # Add system message with chat context
+            context = f"""This is a conversation with {message_data['contact_name']}.
+            Previous messages are shown below with their timestamps.
+            The current time is {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}."""
+            messages.append(SystemMessage(content=context))
+            
+            # Add chat history messages
+            for msg in chat_messages:
                 content = f"[{msg['datetime']}] {msg['content']}"
                 if msg['type'] == 'received':
                     messages.append(HumanMessage(content=content))
                 else:
                     messages.append(AIMessage(content=content))
             
-            # Add the current message
-            current_msg = f"[{message_data['datetime']}] {message_data['content']}"
+            # Add the current message if it's not in chat history
+            current_msg = f"[{datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}] {message_data['message_preview_container']}"
             messages.append(HumanMessage(content=current_msg))
             
             # Initialize agent state
@@ -1393,7 +1482,7 @@ class WhatsAppMonitor:
         # Register default tasks
         self._register_default_tasks()
         
-    async def _register_default_tasks(self):
+    def _register_default_tasks(self):
         """Register default monitoring tasks"""
         # Screenshot task
         # self.add_task(
@@ -1401,8 +1490,6 @@ class WhatsAppMonitor:
         #     self.whatsapp_client.take_screenshot,
         #     "screenshot_task",
         # )
-        
-        await self.whatsapp_client.get_unread_messages()
         
         # Message check task
         self.add_task(
@@ -1447,14 +1534,18 @@ class WhatsAppMonitor:
         results = {}
         execution_start = datetime.now()
         
+        logger.info("Starting task execution cycle")
+        logger.info(f"Active tasks: {[name for name, task in self.tasks.items() if task.enabled]}")
+        
         async with self._task_lock:
             for task_name, task in self.tasks.items():
                 if not task.enabled:
+                    logger.debug(f"Skipping disabled task: {task_name}")
                     continue
                     
                 try:
                     self.current_task = task_name
-                    logger.debug(f"Executing task: {task_name}")
+                    logger.info(f"Executing task: {task_name}")
                     
                     task_start = datetime.now()
                     
@@ -1476,7 +1567,7 @@ class WhatsAppMonitor:
                         'duration': task_duration
                     }
                     
-                    logger.debug(f"Task {task_name} completed in {task_duration:.2f}s")
+                    logger.info(f"Task {task_name} completed in {task_duration:.2f}s")
                     
                 except Exception as e:
                     task.error_count += 1
@@ -1485,7 +1576,7 @@ class WhatsAppMonitor:
                         'error': str(e),
                         'duration': 0
                     }
-                    logger.error(f"Task {task_name} failed: {e}")
+                    logger.error(f"Task {task_name} failed: {e}", exc_info=True)
                     
                 finally:
                     self.current_task = None
@@ -1498,6 +1589,7 @@ class WhatsAppMonitor:
             'execution_time': execution_start.isoformat()
         }
         
+        logger.info(f"Task execution cycle completed in {total_duration:.2f}s")
         return results
     
     async def start_monitoring(self):
