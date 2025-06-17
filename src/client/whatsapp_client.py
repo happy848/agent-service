@@ -17,6 +17,8 @@ from enum import Enum
 from functools import wraps
 
 from client.browser_client import BrowserManager
+from agents import get_agent
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from playwright.async_api import Page
 
@@ -39,6 +41,11 @@ class TaskType(Enum):
     MESSAGE_CHECK = "message_check"
     CUSTOM = "custom"
 
+def can_auto_replay_contact_message(contact_name: str) -> bool:
+    """
+    判断是否可以自动回复联系人的消息
+    """
+    return contact_name in ['ben-service@agentsben.com']
 
 class MonitorTask:
     """Monitor task definition"""
@@ -109,6 +116,7 @@ class WhatsAppBrowserClient:
         self.monitor_interval = monitor_interval
         self.monitor: Optional['WhatsAppMonitor'] = None
         self._monitoring_task: Optional[asyncio.Task] = None
+        self.customer_service_agent = get_agent("customer-service")
         
         # Continue button check tracking
         self._continue_check_attempts = 0
@@ -199,19 +207,31 @@ class WhatsAppBrowserClient:
             return self.monitor.get_status()
         return {'is_running': False, 'monitor_exists': False}
         
-    async def check_new_messages(self) -> List[Dict[str, Any]]:
+    async def check_unread_messages(self) -> List[Dict[str, Any]]:
         """Check new messages"""
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
         
         unread_contact_messages = await self.get_unread_contact_message()
         
-        # if res['unread_messages_found']:
-        #     reply = await self.whatsapp_message_handler.generate_ai_customer_reply(res['chat_messages'])
-        #     if reply['success']:
-        #         await self._send_message_to_current_chat(reply['ai_reply_message'])
-
-        logger.info(f"check_new_messages: {unread_contact_messages}")
+        for contact_message in unread_contact_messages:
+            if can_auto_replay_contact_message(contact_message['contact_name']):
+                # Use the new customer service agent to handle messages
+                reply = await self.handle_customer_message(contact_message)
+                if reply['success']:
+                    # Send each message separately
+                    messages_to_send = reply['ai_reply_message']
+                    if isinstance(messages_to_send, str):
+                        messages_to_send = [messages_to_send]
+                    
+                    for message in messages_to_send:
+                        await self.send_message_to_contact(contact_message['contact_name'], message)
+                        # Add a small delay between messages
+                        await self.page.wait_for_timeout(random.randint(500, 1500))
+                else:
+                    logger.error(f"Failed to generate reply: {reply['error']}")
+        
+        logger.info(f"check_unread_messages: {unread_contact_messages}")
 
         return unread_contact_messages
             
@@ -1283,6 +1303,81 @@ class WhatsAppBrowserClient:
             logger.error(f"Error getting unread contact messages: {e}")
             return []
 
+    async def handle_customer_message(self, message_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle a customer message using the customer service agent.
+        
+        Args:
+            message_data: Dictionary containing message information
+            
+        Returns:
+            Dictionary with response information:
+            {
+                "success": bool,
+                "ai_reply_message": str or List[str],  # Can be a single message or list of messages
+                "error": Optional[str]
+            }
+        """
+        try:
+            # Get chat history for the contact
+            chat_history = message_data
+            
+            # Convert chat history to messages
+            messages = []
+            for msg in chat_history:
+                # Add system message with chat context
+                if len(messages) == 0:
+                    context = f"""This is a conversation with {message_data['contact_name']}.
+                    Previous messages are shown below with their timestamps.
+                    The current time is {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}."""
+                    messages.append(SystemMessage(content=context))
+                
+                # Convert each message to appropriate format
+                content = f"[{msg['datetime']}] {msg['content']}"
+                if msg['type'] == 'received':
+                    messages.append(HumanMessage(content=content))
+                else:
+                    messages.append(AIMessage(content=content))
+            
+            # Add the current message
+            current_msg = f"[{message_data['datetime']}] {message_data['content']}"
+            messages.append(HumanMessage(content=current_msg))
+            
+            # Initialize agent state
+            agent_state = {
+                "messages": messages
+            }
+            
+            # Run the agent
+            result = await self.customer_service_agent.ainvoke(
+                agent_state
+            )
+            
+            # Extract and split the response
+            if result and result.get("messages"):
+                last_message = result["messages"][-1]
+                # Split messages by the \n\n delimiter and clean up any escaped quotes
+                messages_to_send = [msg.strip().strip('"') for msg in last_message.content.split("\n\n") if msg.strip()]
+                logger.info(f"Messages to send: {messages_to_send}")
+                return {
+                    "success": True,
+                    "ai_reply_message": messages_to_send,
+                    "error": None
+                }
+            else:
+                return {
+                    "success": False,
+                    "ai_reply_message": [],
+                    "error": "No response generated"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error handling customer message: {e}", exc_info=True)
+            return {
+                "success": False,
+                "ai_reply_message": [],
+                "error": str(e)
+            }
 
 class WhatsAppMonitor:
     """WhatsApp Web monitoring class that supports timed execution of multiple tasks"""
@@ -1298,7 +1393,7 @@ class WhatsAppMonitor:
         # Register default tasks
         self._register_default_tasks()
         
-    def _register_default_tasks(self):
+    async def _register_default_tasks(self):
         """Register default monitoring tasks"""
         # Screenshot task
         # self.add_task(
@@ -1307,12 +1402,14 @@ class WhatsAppMonitor:
         #     "screenshot_task",
         # )
         
+        await self.whatsapp_client.get_unread_messages()
+        
         # Message check task
-        # self.add_task(
-        #     TaskType.MESSAGE_CHECK,
-        #     self.whatsapp_client.check_new_messages,
-        #     "message_check_task"
-        # )
+        self.add_task(
+            TaskType.MESSAGE_CHECK,
+            self.whatsapp_client.check_unread_messages,
+            "message_check_task"
+        )
     
     def add_task(
         self,

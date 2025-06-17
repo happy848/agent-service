@@ -6,11 +6,12 @@ from asyncio import CancelledError
 from builtins import GeneratorExit
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Dict, Optional, List
 from uuid import UUID, uuid4
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, status, Request
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langchain_core._api import LangChainBetaWarning
 from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, HumanMessage, ToolMessage
@@ -18,6 +19,9 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, Interrupt
 from langsmith import Client as LangsmithClient
+from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.cors import CORSMiddleware
 
 from agents import DEFAULT_AGENT, get_agent, get_all_agent_info
 from core import settings
@@ -43,6 +47,8 @@ from brain import whatsapp
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
+
+logger.setLevel(logging.INFO)
 
 
 def verify_bearer(
@@ -93,7 +99,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.error(f"Error stopping browser service: {e}")
             
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    lifespan=lifespan,
+    # 设置请求超时时间为5分钟
+    timeout=300
+)
+
+# 添加CORS中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 添加超时中间件
+@app.middleware("http")
+async def timeout_middleware(request: Request, call_next):
+    try:
+        return await asyncio.wait_for(call_next(request), timeout=300)
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=504,
+            content={"detail": "Request timeout"}
+        )
+
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 
 
@@ -417,6 +448,79 @@ async def whatsapp_send_message(request: WhatsAppMessageInput):
 #         logger.error(f"Error: {e}", exc_info=True)
     
 #     logger.info("\nDemo completed!")
+
+
+class CustomerServiceInput(BaseModel):
+    """Customer service input model."""
+    message: str
+    timestamp: Optional[str] = None
+    contact_name: Optional[str] = None
+
+class CustomerServiceResponse(BaseModel):
+    """Customer service response model."""
+    ai_reply: str
+    sentiment: Dict[str, Any]
+    categories: List[str]
+    timestamp: str
+
+@app.post("/customer-service/test", response_model=CustomerServiceResponse)
+async def test_customer_service(request: CustomerServiceInput):
+    """Test endpoint for customer service workflow.
+    
+    Example curl:
+    ```bash
+    curl -X POST http://localhost:8080/customer-service/test \
+        -H "Content-Type: application/json" \
+        -d '{"message": "How do I place an order?"}'
+    ```
+    """
+    try:
+        # Get customer service agent
+        agent = get_agent("customer-service")
+        
+        # Prepare timestamp
+        timestamp = request.timestamp or datetime.now().strftime("%H:%M, %Y-%m-%d")
+        
+        # Format message with timestamp
+        message = f"[{timestamp}] {request.message}"
+        if request.contact_name:
+            message = f"From {request.contact_name}: {message}"
+            
+        # Create message state
+        state = {
+            "messages": [HumanMessage(content=message)]
+        }
+        
+        # Run agent
+        logger.info(f"Customer service get messages: {state['messages']}")
+        
+        thread_id = str(uuid4())
+        result = await agent.ainvoke(
+            state,
+            config={
+                "configurable": {
+                    "model": settings.DEFAULT_MODEL,
+                    "thread_id": thread_id,
+                }
+            }
+        )
+        
+        logger.info(f"Customer service agent result: {result}")
+        
+        # Extract results
+        ai_message = result["messages"][-1].content if result.get("messages") else ""
+        sentiment = result.get("sentiment", {"sentiment": "neutral", "confidence": 0.0})
+        categories = result.get("categories", {}).get("categories", ["general"])
+        
+        return CustomerServiceResponse(
+            ai_reply=ai_message,
+            sentiment=sentiment,
+            categories=categories,
+            timestamp=datetime.now().isoformat()
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 app.include_router(router)

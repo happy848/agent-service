@@ -5,6 +5,7 @@ from langgraph.graph.state import CompiledStateGraph
 from agents.bg_task_agent.bg_task_agent import bg_task_agent
 from agents.chatbot import chatbot
 from agents.command_agent import command_agent
+from agents.customer_service_agent import customer_service_agent
 from agents.interrupt_agent import interrupt_agent
 from agents.langgraph_supervisor_agent import langgraph_supervisor_agent
 from agents.research_assistant import research_assistant
@@ -30,6 +31,10 @@ agents: dict[str, Agent] = {
         description="A langgraph supervisor agent", graph=langgraph_supervisor_agent
     ),
     "interrupt-agent": Agent(description="An agent the uses interrupts.", graph=interrupt_agent),
+    "customer-service": Agent(
+        description="A professional customer service agent for handling inquiries.", 
+        graph=customer_service_agent
+    ),
 }
 
 
@@ -39,5 +44,6 @@ def get_agent(agent_id: str) -> CompiledStateGraph:
 
 def get_all_agent_info() -> list[AgentInfo]:
     return [
-        AgentInfo(key=agent_id, description=agent.description) for agent_id, agent in agents.items()
+        AgentInfo(key=agent_id, description=agent.description)
+        for agent_id, agent in agents.items()
     ]

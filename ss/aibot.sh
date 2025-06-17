@@ -224,6 +224,10 @@ WhatsApp命令:
   chat <contact>  获取指定联系人的聊天记录
   send <contact> <message>  发送消息给指定联系人
 
+客服测试命令:
+  cs <message>    测试客服回复（支持中英文）
+  cs-name <name> <message>  带联系人名称测试客服回复
+
 快速开始:
   1. $0 start     # 首次启动
   2. 访问 http://localhost:8501
@@ -241,6 +245,35 @@ WhatsApp命令:
   - 需要配置 .env 文件中的API密钥
   - 首次启动可能需要较长时间下载镜像
 EOF
+}
+
+# 测试客服回复
+test_customer_service() {
+    local message="$1"
+    local contact_name="$2"
+    local data
+    
+    if [ -n "$contact_name" ]; then
+        data="{\"message\": \"$message\", \"contact_name\": \"$contact_name\"}"
+    else
+        data="{\"message\": \"$message\"}"
+    fi
+    
+    log_info "测试客服回复..."
+    log_info "消息: $message"
+    [ -n "$contact_name" ] && log_info "联系人: $contact_name"
+    echo
+    
+    response=$(curl -s -X POST http://localhost:8080/customer-service/test \
+        -H "Content-Type: application/json" \
+        -d "$data")
+    
+    if [ $? -eq 0 ]; then
+        echo "$response" | jq '.'
+    else
+        log_error "请求失败"
+        echo "$response"
+    fi
 }
 
 # 主函数
@@ -298,6 +331,22 @@ main() {
             curl -X POST http://localhost:8080/whatsapp/send_message \
                 -H "Content-Type: application/json" \
                 -d "{\"contact_name\": \"$2\", \"message\": \"$3\"}" | jq '.'
+            ;;
+        cs)
+            if [ -z "$2" ]; then
+                log_error "请提供测试消息"
+                echo "用法: $0 cs <message>"
+                exit 1
+            fi
+            test_customer_service "$2"
+            ;;
+        cs-name)
+            if [ -z "$2" ] || [ -z "$3" ]; then
+                log_error "请提供联系人名称和测试消息"
+                echo "用法: $0 cs-name <name> <message>"
+                exit 1
+            fi
+            test_customer_service "$3" "$2"
             ;;
         help|--help|-h)
             show_help
