@@ -20,7 +20,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, Interrupt
 from langsmith import Client as LangsmithClient
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
@@ -46,7 +46,9 @@ from service.utils import (
     log_performance_metrics,
     performance_metrics,
 )
-from brain import whatsapp
+
+from tools.user_info import get_user_info
+
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
@@ -503,12 +505,6 @@ async def whatsapp_send_message(request: WhatsAppMessageInput):
 #     logger.info("\nDemo completed!")
 
 
-class CustomerServiceInput(BaseModel):
-    """Customer service input model."""
-    message: str
-    timestamp: Optional[str] = None
-    contact_name: Optional[str] = None
-    user_token: Optional[str] = None
 
 class CustomerServiceResponse(BaseModel):
     """Customer service response model."""
@@ -521,7 +517,16 @@ class CustomerServiceResponse(BaseModel):
 
 # curl -X POST http://localhost:8080/customer-service/test \
 #     -H "Content-Type: application/json" \
-#     -d '{"message": "where is my order?", "userToken": "c7151e03-a266-4fe2-96b4-35acfa1ea8df"}'
+#     -d '{"message": "where is my order?", "userToken": "30df16e1-b9bc-4a51-b661-e17d36cd2de3"}'
+
+class CustomerServiceInput(BaseModel):
+    """Customer service input model."""
+    message: str
+    timestamp: Optional[str] = None
+    contact_name: Optional[str] = None
+    user_token: Optional[str] = None
+    thread_id: Optional[str] = None
+
 
 @app.post("/customer-service/test", response_model=CustomerServiceResponse)
 async def test_customer_service(request: CustomerServiceInput):
@@ -554,7 +559,10 @@ async def test_customer_service(request: CustomerServiceInput):
         # Run agent
         logger.info(f"Customer service get messages: {state['messages']}")
         
+        thread_id = request.thread_id or str(uuid4())
+        
         thread_id = str(uuid4())
+        
         result = await agent.ainvoke(
             state,
             config={
@@ -579,10 +587,23 @@ async def test_customer_service(request: CustomerServiceInput):
             categories=categories,
             timestamp=datetime.now().isoformat(),
             result=result,
+            thread_id=thread_id,
         )
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# curl -X POST http://localhost:8080/customer-service/user-info \
+#     -H "Content-Type: application/json" \
+#     -d '{"message": "where is my order?", "user_token": "30df16e1-b9bc-4a51-b661-e17d36cd2de3"}'
+@app.post("/customer-service/user-info")
+async def get_user_info_endpoint(request: CustomerServiceInput):
+    """Get user info endpoint."""
+    logger.info(f"Get user info endpoint: {request}")
+    
+    if not request.user_token:
+        raise HTTPException(status_code=400, detail="user_token is required")
+    
+    return await get_user_info(request.user_token)
 
 app.include_router(router)

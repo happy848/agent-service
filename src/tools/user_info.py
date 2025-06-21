@@ -22,65 +22,27 @@ class UserInfoConfig:
     """用户信息配置"""
     api_base: str = "https://agentsben.com/api"
     bot_token: str = "anodguqSD2#$45680!g#$%^$Yfsdghhrth,.ghDFGeryGhyulFHGJdfgrwadfgdfDFGdfger#$%56dfWEyhj9*h"
-    timeout: int = 60
+    timeout: int = 120
     max_retries: int = 3
-
-
-class UserData(BaseModel):
-    """用户基本信息模型"""
-    email: str
-    email_verification: bool
-    currency_unit: str = "USD"
-    balance_cny: float
-    vip_level: int
-    service_rate: float
-    created_at: datetime
-    updated_at: datetime
-
-
-class OrderItem(BaseModel):
-    """订单项模型"""
-    id: int
-    order_id: str
-    product_name: str
-    product_url: str
-    quantity: int
-    price_cny: float
-    status: str
-    status_alias: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class ParcelData(BaseModel):
-    """包裹信息模型"""
-    id: int
-    parcel_id: str
-    tracking_number: Optional[str]
-    status: str
-    weight: float
-    created_at: datetime
-    updated_at: datetime
-
 
 class UserInfoResponse(BaseModel):
     """用户信息响应模型"""
     success: bool
-    data: Optional[UserData] = None
+    data: Optional[Dict[str, Any]] = None
     message: Optional[str] = None
 
 
 class UserOrdersResponse(BaseModel):
     """用户订单响应模型"""
     success: bool
-    data: Optional[Dict[str, List[OrderItem]]] = None
+    data: Optional[Dict[str, Any]] = None
     message: Optional[str] = None
 
 
 class UserParcelsResponse(BaseModel):
     """用户包裹响应模型"""
     success: bool
-    data: Optional[List[ParcelData]] = None
+    data: Optional[List[Any]] = None
     message: Optional[str] = None
 
 
@@ -117,7 +79,6 @@ class UserInfoClient:
             self.session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self.config.timeout),
                 headers={
-                    "Authorization": f"Bearer {self.config.bot_token}",
                     "Content-Type": "application/json"
                 }
             )
@@ -133,7 +94,6 @@ class UserInfoClient:
         method: str, 
         endpoint: str, 
         data: Optional[Dict[str, Any]] = None,
-        retries: int = 0
     ) -> Dict[str, Any]:
         """
         基础请求函数
@@ -142,7 +102,6 @@ class UserInfoClient:
             method: HTTP方法
             endpoint: API端点
             data: 请求数据
-            retries: 重试次数
             
         Returns:
             响应数据字典
@@ -157,39 +116,32 @@ class UserInfoClient:
         
         url = f"{self.config.api_base}{endpoint}"
         
-        # 自动添加user_token到请求数据中
+        # 构建请求头，将userToken放在Authorization中
+        headers = {
+            "Authorization": f"Bearer {self.user_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # 请求数据不需要包含userToken
         request_data = data or {}
-        if "userToken" not in request_data:
-            request_data["userToken"] = self.user_token
         
         try:
             async with self.session.request(
                 method=method,
                 url=url,
+                headers=headers,
                 json=request_data
             ) as response:
                 response.raise_for_status()
                 result = await response.json()
-                
-                if not result.get("success", False):
-                    error_msg = result.get("message", "Unknown error")
-                    raise Exception(f"API Error: {error_msg}")
-                
+                logger.info(f"Request result: {result}")
                 return result
                 
-        except aiohttp.ClientError as e:
-            if retries < self.config.max_retries:
-                logger.warning(f"Request failed, retrying ({retries + 1}/{self.config.max_retries}): {e}")
-                await asyncio.sleep(2 ** retries)  # 指数退避
-                return await self._make_request(method, endpoint, data, retries + 1)
-            else:
-                logger.error(f"Request failed after {self.config.max_retries} retries: {e}")
-                raise Exception(f"Request failed: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error in request: {e}")
+            logger.error(f"Unexpected error in request: {e}", exc_info=True)
             raise
     
-    async def get_user_info(self) -> UserData:
+    async def get_user_info(self):
         """
         获取当前用户的基本信息
         
@@ -197,12 +149,12 @@ class UserInfoClient:
             用户基本信息
         """
         result = await self._make_request("POST", "/bot/user/info")
-        return UserData(**result["data"])
+        return result
     
     async def get_user_orders(
         self, 
         status_alias: Optional[str] = None
-    ) -> List[OrderItem]:
+    ) -> List[Any]:
         """
         获取当前用户的订单信息
         
@@ -224,19 +176,16 @@ class UserInfoClient:
             data["status_alias"] = status_alias
             
         result = await self._make_request("POST", "/bot/user/orders", data)
-        order_items = result["data"]["order_items"]
-        return [OrderItem(**item) for item in order_items]
+        return result
     
-    async def get_user_parcels(self) -> List[ParcelData]:
+    async def get_user_parcels(self) -> List[Any]:
         """
         获取当前用户的包裹信息
         
         Returns:
             包裹列表（默认最近10个）
         """
-        result = await self._make_request("POST", "/bot/user/parcels")
-        parcels = result["data"]
-        return [ParcelData(**parcel) for parcel in parcels]
+        return await self._make_request("POST", "/bot/user/parcels")
     
     async def get_user_summary(self) -> Dict[str, Any]:
         """
@@ -332,7 +281,7 @@ def get_manager() -> UserInfoManager:
     return _manager
 
 
-async def get_user_info(user_token: str) -> UserData:
+async def get_user_info(user_token: str):
     """
     便捷函数：获取用户基本信息
     
@@ -351,7 +300,7 @@ async def get_user_info(user_token: str) -> UserData:
 async def get_user_orders(
     user_token: str, 
     status_alias: Optional[str] = None
-) -> List[OrderItem]:
+) -> List[Any]:
     """
     便捷函数：获取用户订单信息
     
@@ -370,7 +319,7 @@ async def get_user_orders(
 
 async def get_user_parcels(
     user_token: str
-) -> List[ParcelData]:
+) -> List[Any]:
     """
     便捷函数：获取用户包裹信息
     
@@ -384,85 +333,6 @@ async def get_user_parcels(
     client = manager.get_client(user_token)
     async with client:
         return await client.get_user_parcels()
-
-
-async def get_user_summary(
-    user_token: str
-) -> Dict[str, Any]:
-    """
-    便捷函数：获取用户信息摘要
-    
-    Args:
-        user_token: 用户token
-        
-    Returns:
-        用户信息摘要
-    """
-    manager = get_manager()
-    client = manager.get_client(user_token)
-    async with client:
-        return await client.get_user_summary()
-
-
-# 同步包装函数（用于非异步环境）
-def get_user_info_sync(user_token: str) -> UserData:
-    """
-    同步函数：获取用户基本信息
-    
-    Args:
-        user_token: 用户token
-        
-    Returns:
-        用户基本信息
-    """
-    return asyncio.run(get_user_info(user_token))
-
-
-def get_user_orders_sync(
-    user_token: str, 
-    status_alias: Optional[str] = None
-) -> List[OrderItem]:
-    """
-    同步函数：获取用户订单信息
-    
-    Args:
-        user_token: 用户token
-        status_alias: 订单状态别名
-        
-    Returns:
-        订单列表
-    """
-    return asyncio.run(get_user_orders(user_token, status_alias))
-
-
-def get_user_parcels_sync(
-    user_token: str
-) -> List[ParcelData]:
-    """
-    同步函数：获取用户包裹信息
-    
-    Args:
-        user_token: 用户token
-        
-    Returns:
-        包裹列表
-    """
-    return asyncio.run(get_user_parcels(user_token))
-
-
-def get_user_summary_sync(
-    user_token: str
-) -> Dict[str, Any]:
-    """
-    同步函数：获取用户信息摘要
-    
-    Args:
-        user_token: 用户token
-        
-    Returns:
-        用户信息摘要
-    """
-    return asyncio.run(get_user_summary(user_token))
 
 
 # 使用示例

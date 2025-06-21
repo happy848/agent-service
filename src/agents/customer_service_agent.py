@@ -19,41 +19,36 @@ from langgraph.graph import END, MessagesState, StateGraph, START
 
 from core import get_model, settings
 from schema import ChatMessage
-from tools.user_info import get_user_info, get_user_orders, get_user_parcels, UserData
+from tools.user_info import get_user_info, get_user_orders, get_user_parcels
 
 import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-# Define tools for customer service agent
-@tool
-def get_order_status(order_id: str) -> Dict[str, Any]:
-    """Get the status of an order."""
-    # Mock order status - replace with actual database query
-    return {
-        "status": "processing",
-        "estimated_delivery": "2024-03-20",
-        "tracking_number": "ABC123XYZ"
-    }
+# Define dictionary merge function for parallel execution
+def merge_dicts(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge two dictionaries, with right dict taking precedence for overlapping keys."""
+    if left is None:
+        return right
+    if right is None:
+        return left
+    result = left.copy()
+    result.update(right)
+    return result
 
-@tool
-def calculate_shipping_cost(weight_kg: float, destination: str) -> Dict[str, Any]:
-    """Calculate shipping cost based on weight and destination."""
-    # Mock shipping calculation - replace with actual logic
-    base_rate = 25.0  # Base rate for first kg
-    additional_rate = 12.0  # Rate per additional kg
-    
-    total_cost = base_rate + (weight_kg - 1) * additional_rate if weight_kg > 1 else base_rate
-    
-    return {
-        "base_rate": base_rate,
-        "total_cost": round(total_cost, 2),
-        "currency": "USD",
-        "estimated_days": "8-11"
-    }
+class CustomerServiceState(MessagesState, total=False):
+    """State for customer service agent."""
+    # 使用自定义的merge_dicts函数作为reducer，支持并行执行时的状态合并
+    categories: Annotated[Dict[str, Any], merge_dicts]
+    user_info: Optional[Dict[str, Any]]
+    user_token: Optional[str]
+    background_info: Annotated[Dict[str, Any], merge_dicts]  # 用户背景信息
+    reasoning_response: Optional[str]  # 推理回答
+    humanized_response: Optional[str]  # 拟人回复
+    self_check_passed: Optional[bool]  # 自我检查结果
 
-@tool
+
 async def categorize_message(message: str) -> Dict[str, Any]:
     """Categorize the customer message to determine intent."""
     # 根据文档要求的5个具体分类
@@ -129,89 +124,6 @@ async def categorize_message(message: str) -> Dict[str, Any]:
             "confidence": 0.3,
             "method": "fallback"
         }
-
-class CustomerServiceState(MessagesState, total=False):
-    """State for customer service agent."""
-    # 使用operator.add作为reducer，支持并行执行时的状态合并
-    categories: Annotated[Dict[str, Any], operator.add]
-    user_info: Optional[UserData]
-    user_token: Optional[str]
-    background_info: Annotated[Dict[str, Any], operator.add]  # 用户背景信息
-    reasoning_response: Optional[str]  # 推理回答
-    humanized_response: Optional[str]  # 拟人回复
-    self_check_passed: Optional[bool]  # 自我检查结果
-
-def wrap_model(model: BaseChatModel) -> RunnableSerializable[CustomerServiceState, AIMessage]:
-    """Wrap the model with system prompt and state handling."""
-    
-    def create_system_prompt(state: CustomerServiceState) -> str:
-        base_prompt = """You are a professional customer service agent for an international purchasing agency.
-        Your role is to assist customers with their orders, shipping inquiries, and general questions.
-        Always be polite, professional, and helpful. Match the language of the customer in your responses.
-        
-        Key business points:
-        1. We help customers purchase products internationally
-        2. Shipping typically takes 8-11 working days
-        3. Base shipping rate is $25 for first kg, $12 for each additional kg
-        4. We accept payments via bank transfer (SEPA/SWIFT) or Revolut/Wise
-        5. All prices are in USD unless specified otherwise
-        
-        Ordering Process:
-        1. Customer pastes product link into our search bar
-        2. They select product options and add to cart
-        3. Submit order and top up balance
-        4. We purchase and ship to warehouse
-        5. Customer creates shipping parcel
-        6. Pay shipping fee and we deliver internationally
-        
-        WhatsApp Message Guidelines:
-        - Keep each message under 300 characters when possible
-        - For long explanations, split into multiple shorter messages
-        - Use line breaks to improve readability
-        - Start new messages for new topics or steps
-        - Use emojis sparingly but effectively
-        - End each message with a clear call to action
-        
-        Remember to:
-        - Be concise and direct - WhatsApp users prefer shorter messages
-        - Use bullet points for lists
-        - Break down complex information into digestible chunks
-        - Show empathy when dealing with issues
-        - Maintain a professional but friendly tone
-        - Reference previous messages when relevant
-        - Acknowledge time gaps appropriately
-        - Add friendly emojis to seem more human-like
-        - Use casual, conversational language while maintaining professionalism
-        - NEVER include timestamps in your responses
-        - ALWAYS use "\n\n" to indicate where a message should be split into separate WhatsApp messages"""
-        
-        # 添加用户信息到系统提示
-        user_info = state.get("user_info")
-        if user_info:
-            user_context = f"""
-        
-        Current Customer Information:
-        - Email: {user_info.email}
-        - VIP Level: {user_info.vip_level}
-        - Balance: {user_info.balance_cny} CNY
-        - Service Rate: {user_info.service_rate}%
-        - Currency: {user_info.currency_unit}
-        - Account Status: {'Verified' if user_info.email_verification else 'Unverified'}
-        
-        Use this information to provide personalized service:
-        - Address the customer by their VIP level when appropriate
-        - Reference their current balance when discussing payments
-        - Consider their service rate for pricing discussions
-        - Adjust your tone based on their account verification status"""
-            return base_prompt + user_context
-        else:
-            return base_prompt + "\n\nNote: Customer information not available. Provide general assistance."
-    
-    preprocessor = RunnableLambda(
-        lambda state: [SystemMessage(content=create_system_prompt(state))] + state["messages"],
-        name="StateModifier",
-    )
-    return preprocessor | model
 
 async def categorize_customer_message(state: CustomerServiceState, config: RunnableConfig) -> CustomerServiceState:
     """Categorize the customer message to determine intent."""
@@ -406,42 +318,6 @@ async def final_response(state: CustomerServiceState, config: RunnableConfig) ->
         # 如果没有拟人化回复，使用推理回复
         reasoning_response = state.get("reasoning_response", "")
         return {"messages": [AIMessage(content=reasoning_response)]}
-
-@tool
-async def get_user_orders_info(user_token: str, status_alias: str = None) -> Dict[str, Any]:
-    """Get user's order information."""
-    try:
-        orders = await get_user_orders(user_token, status_alias)
-        return {
-            "success": True,
-            "orders": [order.dict() for order in orders],
-            "count": len(orders)
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "orders": [],
-            "count": 0
-        }
-
-@tool
-async def get_user_parcels_info(user_token: str) -> Dict[str, Any]:
-    """Get user's parcel information."""
-    try:
-        parcels = await get_user_parcels(user_token)
-        return {
-            "success": True,
-            "parcels": [parcel.dict() for parcel in parcels],
-            "count": len(parcels)
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "parcels": [],
-            "count": 0
-        }
 
 # Define the graph
 agent = StateGraph(CustomerServiceState)
