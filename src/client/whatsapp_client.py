@@ -19,8 +19,8 @@ from pydantic import BaseModel, Field
 from uuid import uuid4
 
 from client.browser_client import BrowserManager
-from agents import get_agent
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from agents.customer_service_agent import customer_service_agent
 
 from playwright.async_api import Page
 
@@ -120,7 +120,7 @@ class WhatsAppBrowserClient:
         self.monitor_interval = monitor_interval
         self.monitor: Optional['WhatsAppMonitor'] = None
         self._monitoring_task: Optional[asyncio.Task] = None
-        self.customer_service_agent = get_agent("customer-service")
+        self.customer_service_agent = customer_service_agent
         
         # Continue button check tracking
         self._continue_check_attempts = 0

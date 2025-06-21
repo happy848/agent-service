@@ -16,10 +16,10 @@ from typing import Dict, List, Any, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph.state import CompiledStateGraph
 
-from agents import get_agent
 from core import settings
 from service.browser_service import get_whatsapp_client
 from client.whatsapp_client import WhatsAppBrowserClient
+from agents.customer_service_agent import customer_service_agent
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class WhatsAppTool:
         
         # 获取chatbot代理
         try:
-            self.agent: CompiledStateGraph = get_agent('chatbot')
+            self.agent: CompiledStateGraph = customer_service_agent
         except Exception as e:
             logger.error(f"Failed to load agent chatbot: {e}")
             raise

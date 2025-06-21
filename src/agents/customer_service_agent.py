@@ -16,7 +16,6 @@ from langchain_core.runnables import RunnableConfig, RunnableLambda, RunnableSer
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, MessagesState, StateGraph, START
-from langgraph.prebuilt import create_react_agent
 
 from core import get_model, settings
 from schema import ChatMessage
