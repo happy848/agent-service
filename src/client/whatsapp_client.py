@@ -140,6 +140,7 @@ class WhatsAppBrowserClient:
         await self.close()
         
     async def start(self):
+        return
         """Start the browser and navigate to WhatsApp Web."""
         # Start browser manager
         await self.browser_manager.start()

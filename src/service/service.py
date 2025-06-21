@@ -2,6 +2,7 @@ import json
 import logging
 import warnings
 import asyncio
+import time
 from asyncio import CancelledError
 from builtins import GeneratorExit
 from collections.abc import AsyncGenerator
@@ -42,6 +43,8 @@ from service.utils import (
     convert_message_content_to_string,
     langchain_to_chat_message,
     remove_tool_calls,
+    log_performance_metrics,
+    performance_metrics,
 )
 from brain import whatsapp
 
@@ -62,6 +65,37 @@ def verify_bearer(
     auth_secret = settings.AUTH_SECRET.get_secret_value()
     if not http_auth or http_auth.credentials != auth_secret:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+
+class TimingMiddleware(BaseHTTPMiddleware):
+    """中间件：记录请求处理时间"""
+    
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        
+        # 处理请求
+        response = await call_next(request)
+        
+        # 计算处理时间
+        process_time = time.time() - start_time
+        
+        # 添加处理时间到响应头
+        response.headers["X-Process-Time"] = str(process_time)
+        response.headers["X-Process-Time-MS"] = str(int(process_time * 1000))
+        
+        # 记录性能指标
+        log_performance_metrics(
+            request_path=str(request.url.path),
+            method=request.method,
+            status_code=response.status_code,
+            process_time=process_time,
+            additional_metrics={
+                "query_params": str(request.query_params),
+                "client_ip": request.client.host if request.client else "unknown"
+            }
+        )
+        
+        return response
 
 
 @asynccontextmanager
@@ -113,6 +147,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 添加请求耗时中间件
+app.add_middleware(TimingMiddleware)
 
 # 添加超时中间件
 @app.middleware("http")
@@ -405,6 +442,22 @@ async def health_check():
     return {"status": "ok"}
 
 
+@app.get("/performance/metrics")
+async def get_performance_metrics():
+    """获取性能指标摘要"""
+    return {
+        "summary": performance_metrics.get_summary(),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.post("/performance/reset")
+async def reset_performance_metrics():
+    """重置性能指标"""
+    performance_metrics.reset()
+    return {"message": "Performance metrics reset successfully"}
+
+
 # curl -s http://localhost:8080/whatsapp/unread_messages
 @app.get("/whatsapp/unread_messages")
 async def whatsapp_unread_messages():
@@ -455,6 +508,7 @@ class CustomerServiceInput(BaseModel):
     message: str
     timestamp: Optional[str] = None
     contact_name: Optional[str] = None
+    user_token: Optional[str] = None
 
 class CustomerServiceResponse(BaseModel):
     """Customer service response model."""
@@ -462,6 +516,12 @@ class CustomerServiceResponse(BaseModel):
     sentiment: Dict[str, Any]
     categories: List[str]
     timestamp: str
+    result: Any
+
+
+# curl -X POST http://localhost:8080/customer-service/test \
+#     -H "Content-Type: application/json" \
+#     -d '{"message": "where is my order?", "userToken": "c7151e03-a266-4fe2-96b4-35acfa1ea8df"}'
 
 @app.post("/customer-service/test", response_model=CustomerServiceResponse)
 async def test_customer_service(request: CustomerServiceInput):
@@ -501,6 +561,7 @@ async def test_customer_service(request: CustomerServiceInput):
                 "configurable": {
                     "model": settings.DEFAULT_MODEL,
                     "thread_id": thread_id,
+                    "user_token": request.user_token
                 }
             }
         )
@@ -508,15 +569,16 @@ async def test_customer_service(request: CustomerServiceInput):
         logger.info(f"Customer service agent result: {result}")
         
         # Extract results
-        ai_message = result["messages"][-1].content if result.get("messages") else ""
+        ai_reply = result["messages"][-1].content if result.get("messages") else ""
         sentiment = result.get("sentiment", {"sentiment": "neutral", "confidence": 0.0})
         categories = result.get("categories", {}).get("categories", ["general"])
         
         return CustomerServiceResponse(
-            ai_reply=ai_message,
+            ai_reply=ai_reply,
             sentiment=sentiment,
             categories=categories,
-            timestamp=datetime.now().isoformat()
+            timestamp=datetime.now().isoformat(),
+            result=result,
         )
         
     except Exception as e:

@@ -1,0 +1,379 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+以下是LangChain各模块编码工具的整理文档，涵盖核心功能、工具类及编码示例，便于AI开发时引用：
+
+
+### **一、核心模块与工具总览**
+LangChain通过模块化设计提供各类LLM应用开发工具，主要分为以下几大板块：
+
+| **模块类别**       | **核心工具/功能**                                                                 |
+|--------------------|----------------------------------------------------------------------------------|
+| **模型交互**       | ChatModels、LLMs、EmbeddingModels                                                |
+| **提示工程**       | PromptTemplates、ExampleSelectors                                                |
+| **文档处理**       | DocumentLoaders、TextSplitters、VectorStores                                     |
+| **工具调用**       | Tools、Agents、RunnableConfig                                                     |
+| **输出处理**       | OutputParsers                                                                    |
+| **应用场景**       | RAG、Chatbots、Summarization、SQL Q&A                                            |
+| **扩展与监控**     | Callbacks、LangSmith、Serialization                                              |
+
+
+### **二、各模块工具详解与编码示例**
+
+#### **1. 模型交互工具**
+- **功能**：连接LLM模型并处理输入输出
+- **核心类**：
+  - `ChatOpenAI`/`OpenAI`：调用OpenAI的聊天/基础LLM
+  - `HuggingFaceHub`：集成Hugging Face模型
+  - `Embedding`：文本向量化工具（如OpenAIEmbeddings）
+
+- **编码示例**：
+```python
+from langchain.llms import OpenAI
+from langchain.chat_models import ChatOpenAI
+from langchain.embeddings import OpenAIEmbeddings
+
+# 初始化基础LLM
+llm = OpenAI(temperature=0.7)
+response = llm("写一个科幻小故事开头")
+
+# 初始化聊天模型
+chat_model = ChatOpenAI(model_name="gpt-4")
+messages = [{"role": "user", "content": "推荐一部科幻电影"}]
+chat_response = chat_model(messages)
+
+# 文本向量化
+embeddings = OpenAIEmbeddings()
+text_embedding = embeddings.embed_query("人工智能的发展趋势")
+```
+
+
+#### **2. 提示工程工具**
+- **功能**：构建、优化LLM输入提示
+- **核心类**：
+  - `PromptTemplate`：格式化提示模板
+  - `FewShotPromptTemplate`：少样本提示生成
+  - `ExampleSelector`：动态选择示例（如按长度、语义相似度）
+
+- **编码示例**：
+```python
+from langchain.prompts import PromptTemplate, FewShotPromptTemplate
+from langchain.prompts.example_selector import LengthBasedExampleSelector
+
+# 基础提示模板
+template = """
+用户问题: {question}
+要求: 用3句话以内回答，保持简洁。
+回答: """
+prompt = PromptTemplate(
+    input_variables=["question"],
+    template=template
+)
+
+# 少样本提示（带示例）
+examples = [
+    {"question": "地球为什么会自转?", "answer": "地球自转是由于形成时的角动量守恒，初始旋转能量保留至今。"},
+    {"question": "太阳为什么会发光?", "answer": "太阳内部通过核聚变反应，将氢转化为氦并释放能量。"}
+]
+example_selector = LengthBasedExampleSelector(
+    examples=examples, 
+    max_length=50  # 按回答长度筛选示例
+)
+few_shot_prompt = FewShotPromptTemplate(
+    example_selector=example_selector,
+    example_prompt=PromptTemplate(
+        input_variables=["question", "answer"],
+        template="问题: {question}\n答案: {answer}\n"
+    ),
+    prefix="请根据示例简洁回答问题:",
+    suffix="问题: {question}\n答案:",
+    input_variables=["question"]
+)
+
+# 生成提示
+final_prompt = few_shot_prompt.format(question="月亮为什么有阴晴圆缺?")
+```
+
+
+#### **3. 文档处理工具**
+- **功能**：加载、分割、存储文档及向量化
+- **核心类**：
+  - `DocumentLoader`：加载不同格式文档（PDF、CSV、Web等）
+  - `TextSplitter`：文本分块（按字符、token、语义等）
+  - `VectorStore`：向量存储（如Chroma、Pinecone）
+
+- **编码示例**：
+```python
+from langchain.document_loaders import PyPDFLoader, WebBaseLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import Chroma
+from langchain.embeddings import OpenAIEmbeddings
+
+# 加载PDF文档
+loader = PyPDFLoader("docs/research_paper.pdf")
+documents = loader.load()
+
+# 加载网页内容
+web_loader = WebBaseLoader("https://example.com/article")
+web_docs = web_loader.load()
+
+# 文本分块（按递归字符分割，避免在句子中间断开）
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,
+    chunk_overlap=200,
+    separators=["\n\n", "\n", " ", ""]
+)
+split_docs = text_splitter.split_documents(documents)
+
+# 向量化并存储到Chroma数据库
+embeddings = OpenAIEmbeddings()
+vectorstore = Chroma.from_documents(
+    documents=split_docs,
+    embedding=embeddings,
+    persist_directory="./chroma_db"  # 持久化存储
+)
+vectorstore.persist()
+
+# 检索相似文档
+query = "文档中提到的机器学习算法有哪些？"
+similar_docs = vectorstore.similarity_search(query, k=3)
+```
+
+
+#### **4. 工具调用与代理**
+- **功能**：让LLM调用外部工具（如API、计算器）并处理结果
+- **核心类**：
+  - `Tool`：定义工具函数与描述
+  - `AgentExecutor`：传统代理执行器
+  - `LLMChain`：LLM与工具的链式组合
+
+- **编码示例**：
+```python
+from langchain.tools import Tool, BaseTool
+from langchain.agents import AgentExecutor, LLMSingleActionAgent
+from langchain.prompts import StringPromptTemplate
+from langchain.utilities import SerpAPIWrapper
+from langchain.llms import OpenAI
+
+# 定义工具：使用SerpAPI进行网络搜索
+search = SerpAPIWrapper()
+tools = [
+    Tool(
+        name="Search",
+        func=search.run,
+        description="当需要获取实时信息或搜索网络内容时使用，例如天气、新闻、最新数据等"
+    )
+]
+
+# 自定义提示模板（指定工具调用格式）
+template = """
+用户问题: {input}
+{tools_description}
+当前可用工具: {tools}
+
+请根据问题决定是否需要调用工具：
+- 如果需要，使用格式: ```Action: 工具名\nAction Input: 工具输入```
+- 如果不需要，直接回答问题。
+
+思考过程: {thoughts}
+"""
+
+class CustomPromptTemplate(StringPromptTemplate):
+    template: str
+    tools: list
+    
+    def format(self, **kwargs) -> str:
+        kwargs["tools"] = "\n".join([f"{tool.name}: {tool.description}" for tool in self.tools])
+        kwargs["tools_description"] = "使用以下工具辅助回答问题："
+        return self.template.format(**kwargs)
+
+prompt = CustomPromptTemplate(
+    template=template,
+    tools=tools,
+    input_variables=["input", "thoughts"]
+)
+
+# 初始化LLM与代理
+llm = OpenAI(temperature=0)
+agent = LLMSingleActionAgent(
+    llm_chain=llm.bind(prompt=prompt),
+    tools=tools,
+    verbose=True
+)
+agent_executor = AgentExecutor.from_agent_and_tools(
+    agent=agent,
+    tools=tools,
+    verbose=True
+)
+
+# 调用代理（示例：查询实时天气）
+result = agent_executor.run("北京今天的天气如何？需要带伞吗？")
+```
+
+
+#### **5. 输出解析工具**
+- **功能**：将LLM非结构化输出转为结构化数据
+- **核心类**：
+  - `OutputParser`：基础解析器
+  - `JSONOutputParser`：解析JSON格式
+  - `REOutputParser`：正则表达式解析
+
+- **编码示例**：
+```python
+from langchain.output_parsers import JSONOutputParser, RegexParser
+from langchain.prompts import PromptTemplate
+from langchain.llms import OpenAI
+
+# JSON解析器：指定输出格式
+parser = JSONOutputParser(
+    schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "书名"},
+            "author": {"type": "string", "description": "作者"},
+            "year": {"type": "integer", "description": "出版年份"}
+        },
+        "required": ["name", "author", "year"]
+    }
+)
+
+# 提示模板中要求LLM按格式输出
+prompt = PromptTemplate(
+    template="""
+请根据主题推荐一本书，输出JSON格式：
+{format_instructions}
+
+主题：人工智能发展史
+""",
+    input_variables=[],
+    partial_variables={"format_instructions": parser.get_format_instructions()}
+)
+
+# 调用LLM并解析
+llm = OpenAI(temperature=0)
+formatted_prompt = prompt.format()
+llm_output = llm(formatted_prompt)
+book_info = parser.parse(llm_output)
+print(book_info)  # 输出解析后的字典：{"name": "...", "author": "...", "year": ...}
+
+# 正则解析器示例：提取数字
+regex_parser = RegexParser(
+    regex=r"数字：(\d+)",
+    output_keys=["number"]
+)
+text = "结果是：数字：12345"
+number = regex_parser.parse(text)
+print(number)  # {"number": "12345"}
+```
+
+
+#### **6. 检索增强生成（RAG）工具**
+- **功能**：结合文档检索与LLM生成回答
+- **核心类**：
+  - `RetrievalQA`：基础RAG链
+  - `VectorDBQA`：向量数据库驱动的RAG
+  - `CombinedDocumentChain`：多文档处理
+
+- **编码示例**：
+```python
+from langchain.chains import RetrievalQA
+from langchain.vectorstores import Chroma
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.llms import OpenAI
+
+# 加载已存在的向量数据库
+embeddings = OpenAIEmbeddings()
+vectorstore = Chroma(
+    persist_directory="./chroma_db",
+    embedding_function=embeddings
+)
+
+# 构建RAG链（检索+LLM回答）
+llm = OpenAI(temperature=0.2)
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    chain_type="stuff",  # 一次性传入所有检索文档
+    retriever=vectorstore.as_retriever(),
+    return_source_documents=True  # 返回答案来源文档
+)
+
+# 提问并获取回答
+query = "文档中提到的深度学习模型有哪些？"
+result = qa_chain({"query": query})
+print("回答:", result["result"])
+print("来源文档:", result["source_documents"])
+```
+
+
+#### **7. 监控与调试工具（LangSmith）**
+- **功能**：追踪LLM应用运行过程，辅助调试与评估
+- **核心类**：
+  - `LangSmithCallbackHandler`：回调处理器
+  - `Trace`：记录调用链轨迹
+  - `Evaluation`：模型性能评估
+
+- **编码示例**：
+```python
+from langchain.callbacks import LangSmithCallbackHandler
+from langchain.llms import OpenAI
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+import langsmith
+from langsmith import Client
+
+# 初始化LangSmith（需API密钥）
+langsmith.login()
+client = Client()
+
+# 定义回调处理器
+callback = LangSmithCallbackHandler(
+    project_name="my-llm-app",
+    trace_id="unique-trace-123"
+)
+
+# 使用回调监控LLM调用
+llm = OpenAI(temperature=0.7, callbacks=[callback])
+prompt = PromptTemplate(
+    input_variables=["topic"],
+    template="写一篇关于{topic}的科普文章大纲"
+)
+chain = LLMChain(llm=llm, prompt=prompt)
+
+# 执行链并记录追踪
+result = chain.run("量子计算")
+
+# 在LangSmith中查看追踪结果
+trace = client.read_trace("unique-trace-123")
+print(trace)
+```
+
+
+### **三、工具调用流程与最佳实践**
+1. **典型开发流程**：
+   1. 初始化模型与工具（LLM、Embedding、VectorStore等）
+   2. 构建提示模板或加载文档
+   3. 定义工具调用逻辑（Agent/Chain）
+   4. 配置输出解析器
+   5. 集成监控回调（LangSmith）
+   6. 执行并处理结果
+
+2. **最佳实践**：
+   - **模块化设计**：将不同功能（如文档加载、检索、生成）拆分为独立组件
+   - **参数优化**：根据场景调整LLM的`temperature`、分块大小、检索数量等参数
+   - **错误处理**：在工具调用中添加重试机制（`OutputParserRetry`）
+   - **成本控制**：启用token用量追踪，避免不必要的模型调用
+
+
+### **四、官方资源与扩展**
+- **文档链接**：[LangChain How-to Guides](https://python.langchain.com/docs/how_to)
+- **工具库**：
+  - 预构建工具：`langchain.tools`（包含搜索、计算器、API调用等）
+  - 集成提供商：OpenAI、Hugging Face、AWS Bedrock等
+- **自定义扩展**：
+  - 自定义工具：继承`BaseTool`类
+  - 自定义模型：实现`LLM`或`ChatModel`抽象类
+  - 自定义回调：继承`BaseCallbackHandler`
+
+通过上述工具组合，可快速构建复杂的LLM应用，如智能问答系统、文档分析助手、多轮对话机器人等。

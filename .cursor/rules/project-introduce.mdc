@@ -6,8 +6,10 @@ alwaysApply: true
 #  AI Agent Service 项目介绍
 
 ## 项目概述
-实现一个代理采购网站的AI大脑,可以回复客户的消息，并记录排期各种任务，配合仓库的人员完成网站的运作
-1. 客服模块: 常驻一个浏览器定时监测用户的whatsapp消息,收到用户消息后使用AI工具完成分析回复用户
+本项目是一个跨境代购电商平台的AI大脑，平台主要服务于海外用户代购中国商品。
+AI大脑可以回复客户的消息，并记录排期各种任务，配合仓库的人员完成代购网站的运作
+1. whatsapp工具: 常驻一个浏览器定时监测用户的whatsapp消息,收到用户消息后使用agent工具完成分析回复用户
+2. 各种agents完成不同的工作，配合协作处理各种事务
 
 ### 项目描述
 是一个完整的AI智能体服务工具包，基于LangGraph、FastAPI
@@ -286,7 +288,4 @@ from core import settings
 - [Playwright官方](mdc:https:/docs.pydantic.dev)文档
 
 ---
-
-*最后更新: 2024年*
-
 
