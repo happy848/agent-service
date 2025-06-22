@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Literal, List, Dict, Any, Optional, Annotated
 import re
 import operator
+import logging
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
@@ -21,10 +22,7 @@ from core import get_model, settings
 from schema import ChatMessage
 from tools.user_info import get_user_summary, get_user_orders, get_user_parcels
 
-import logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
+# 使用全局logging，不需要单独的logger配置
 
 # Define dictionary merge function for parallel execution
 def merge_dicts(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
@@ -41,9 +39,9 @@ class CustomerServiceState(MessagesState, total=False):
     """State for customer service agent."""
     # 使用自定义的merge_dicts函数作为reducer，支持并行执行时的状态合并
     categories: Annotated[Dict[str, Any], merge_dicts]
-    user_info: Optional[Dict[str, Any]]
-    user_token: Optional[str]
-    background_info: Annotated[Dict[str, Any], merge_dicts]  # 用户背景信息
+    userInfo: Optional[Dict[str, Any]]
+    userToken: Optional[str]
+    backgroundInfo: Annotated[Dict[str, Any], merge_dicts]  # 用户背景信息
     reasoning_response: Optional[str]  # 推理回答
     humanized_response: Optional[str]  # 拟人回复
     self_check_passed: Optional[bool]  # 自我检查结果
@@ -117,7 +115,7 @@ async def categorize_message(message: str) -> Dict[str, Any]:
         }
         
     except Exception as e:
-        logger.warning(f"LLM inference failed for message categorization: {e}")
+        logging.warning(f"LLM inference failed for message categorization: {e}")
         # 如果LLM推理失败，默认为other_issues
         return {
             "categories": ["other_issues"],
@@ -135,60 +133,64 @@ async def categorize_customer_message(state: CustomerServiceState, config: Runna
     return {"categories": categories}
 
 async def get_user_information(state: CustomerServiceState, config: RunnableConfig) -> CustomerServiceState:
-    """Get user information using user_token from config."""
+    """Get user information using userToken from config."""
     try:
         # 从config中获取user_token
-        user_token = config.get("configurable", {}).get("user_token")
-        if not user_token:
+        userToken = config.get("configurable", {}).get("userToken")
+        logging.info(f"User token: {userToken}")
+        logging.info(f"User configurable: {config.get('configurable', {})}")
+        logging.info(f"User config: {config}")
+        if not userToken:
             return {
-                "user_info": None, 
-                "user_token": None, 
-                "background_info": {
-                    "user_info": None,
+                "userInfo": None, 
+                "userToken": None, 
+                "backgroundInfo": {
+                    "userInfo": None,
                     "orders": [],
                     "parcels": []
                 }
             }
         
         # 获取用户信息
-        user_info = await get_user_summary(user_token)
+        userInfo = await get_user_summary(userToken)
         
-        logger.info(f"User token: {user_token}")
-        logger.info(f"User info: {user_info}")
+        logging.info(f"User token: {userToken}")
+        logging.info(f"User info: {userInfo}")
         
         # 并发获取用户订单和包裹信息
-        background_info = {
-            "user_info": user_info,
+        backgroundInfo = {
+        
+            "userInfo": userInfo,
             "orders": [],
             "parcels": []
         }
         
         try:
-            orders = await get_user_orders(user_token)
-            background_info["orders"] = [order.dict() for order in orders]
+            orders = await get_user_orders(userToken)
+            backgroundInfo["orders"] = [order.dict() for order in orders]
         except Exception as e:
-            logger.warning(f"Failed to get user orders: {e}")
+            logging.warning(f"Failed to get user orders: {e}")
             
         try:
-            parcels = await get_user_parcels(user_token)
-            background_info["parcels"] = [parcel.dict() for parcel in parcels]
+            parcels = await get_user_parcels(userToken)
+            backgroundInfo["parcels"] = [parcel.dict() for parcel in parcels]
         except Exception as e:
-            logger.warning(f"Failed to get user parcels: {e}")
+            logging.warning(f"Failed to get user parcels: {e}")
         
         return {
-            "user_info": user_info, 
-            "user_token": user_token,
-            "background_info": background_info
+            "userInfo": userInfo, 
+            "userToken": userToken,
+            "backgroundInfo": backgroundInfo
         }
         
     except Exception as e:
         # 如果获取用户信息失败，记录错误但继续处理
-        logger.error(f"Failed to get user info: {e}")
+        logging.error(f"Failed to get user info: {e}")
         return {
-            "user_info": None, 
-            "user_token": user_token, 
-            "background_info": {
-                "user_info": None,
+            "userInfo": None, 
+            "userToken": userToken, 
+            "backgroundInfo": {
+                "userInfo": None,
                 "orders": [],
                 "parcels": []
             }
@@ -201,13 +203,13 @@ async def reasoning_response(state: CustomerServiceState, config: RunnableConfig
     # 构建推理提示
     user_message = state["messages"][-1].content if state["messages"] else ""
     categories = state.get("categories", {}).get("categories", [])
-    background_info = state.get("background_info", {})
+    backgroundInfo = state.get("backgroundInfo", {})
     
     reasoning_prompt = f"""基于以下信息进行深度推理，生成专业、准确的回答：
 
 用户问题：{user_message}
 问题分类：{categories}
-用户背景信息：{background_info}
+用户背景信息：{backgroundInfo}
 
 请根据问题分类提供相应的专业回答：
 
@@ -268,7 +270,7 @@ async def self_check_response(state: CustomerServiceState, config: RunnableConfi
         return {"self_check_passed": True}
     else:
         # 检查不通过，需要重新推理
-        logger.warning(f"Self check failed: {check_result}")
+        logging.warning(f"Self check failed: {check_result}")
         return {"self_check_passed": False, "check_feedback": check_result}
 
 async def humanize_response(state: CustomerServiceState, config: RunnableConfig) -> CustomerServiceState:
@@ -277,7 +279,7 @@ async def humanize_response(state: CustomerServiceState, config: RunnableConfig)
     
     reasoning_response = state.get("reasoning_response", "")
     user_message = state["messages"][-1].content if state["messages"] else ""
-    background_info = state.get("background_info", {})
+    backgroundInfo = state.get("backgroundInfo", {})
     
     humanize_prompt = f"""请将以下专业回答转换为自然、口语化的拟人回复：
 
@@ -367,7 +369,7 @@ async def example_customer_service_usage():
     
     # 模拟用户消息
     user_message = "Hi, I want to check my order status"
-    user_token = "example_user_token_123"
+    userToken = "example_user_token_123"
     
     # 创建初始状态
     initial_state = {
@@ -377,7 +379,7 @@ async def example_customer_service_usage():
     # 配置，包含user_token
     config = {
         "configurable": {
-            "user_token": user_token,
+            "userToken": userToken,
             "model": settings.DEFAULT_MODEL
         }
     }
@@ -389,34 +391,34 @@ async def example_customer_service_usage():
         # 获取AI回复
         ai_messages = [msg for msg in result["messages"] if isinstance(msg, AIMessage)]
         
-        logger.info("Customer Service Agent Response:")
+        logging.info("Customer Service Agent Response:")
         for msg in ai_messages:
-            logger.info(f"AI: {msg.content}")
+            logging.info(f"AI: {msg.content}")
             
         # 打印用户信息（如果获取成功）
-        if result.get("user_info"):
-            user_info = result["user_info"]
-            logger.info(f"\nUser Info Retrieved:")
-            logger.info(f"- Email: {user_info.email}")
-            logger.info(f"- VIP Level: {user_info.vip_level}")
-            logger.info(f"- Balance: {user_info.balance_cny} CNY")
+        if result.get("userInfo"):
+            userInfo = result["userInfo"]
+            logging.info(f"\nUser Info Retrieved:")
+            logging.info(f"- Email: {userInfo.email}")
+            logging.info(f"- VIP Level: {userInfo.vip_level}")
+            logging.info(f"- Balance: {userInfo.balance_cny} CNY")
             
         # 打印并行执行的结果
-        logger.info(f"\nParallel Execution Results:")
-        logger.info(f"- Categories: {result.get('categories', {})}")
-        logger.info(f"- Background Info: {result.get('background_info', {})}")
+        logging.info(f"\nParallel Execution Results:")
+        logging.info(f"- Categories: {result.get('categories', {})}")
+        logging.info(f"- Background Info: {result.get('backgroundInfo', {})}")
             
     except Exception as e:
-        logger.info(f"Error running customer service agent: {e}")
+        logging.info(f"Error running customer service agent: {e}")
 
 # 测试并行执行
 async def test_parallel_execution():
     """测试并行执行是否正常工作"""
-    logger.info("Testing parallel execution of get_user_info and category_analyzer...")
+    logging.info("Testing parallel execution of get_user_info and category_analyzer...")
     
     # 模拟用户消息
     user_message = "How much is shipping to Germany?"
-    user_token = "test_user_token"
+    userToken = "test_user_token"
     
     # 创建初始状态
     initial_state = {
@@ -426,7 +428,7 @@ async def test_parallel_execution():
     # 配置
     config = {
         "configurable": {
-            "user_token": user_token,
+            "userToken": userToken,
             "model": settings.DEFAULT_MODEL
         }
     }
@@ -435,13 +437,13 @@ async def test_parallel_execution():
         # 运行智能体
         result = await customer_service_agent.ainvoke(initial_state, config)
         
-        logger.info("✅ Parallel execution test completed!")
-        logger.info(f"Categories: {result.get('categories', {})}")
-        logger.info(f"User Info: {result.get('user_info', 'Not retrieved')}")
-        logger.info(f"Background Info: {result.get('background_info', {})}")
+        logging.info("✅ Parallel execution test completed!")
+        logging.info(f"Categories: {result.get('categories', {})}")
+        logging.info(f"User Info: {result.get('userInfo', 'Not retrieved')}")
+        logging.info(f"Background Info: {result.get('backgroundInfo', {})}")
         
         return True
         
     except Exception as e:
-        logger.info(f"❌ Parallel execution test failed: {e}")
+        logging.info(f"❌ Parallel execution test failed: {e}")
         return False

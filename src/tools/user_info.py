@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import aiohttp
 
-
 @dataclass
 class UserInfoConfig:
     """用户信息配置"""

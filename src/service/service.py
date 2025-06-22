@@ -49,15 +49,20 @@ from service.utils import (
 
 from tools.user_info import get_user_summary
 
+# 导入WhatsApp模块
+# from brain import whatsapp
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 
+LOG_FORMAT = "[%(asctime)s] [%(levelname)s] [%(name)s:%(lineno)d] %(message)s"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-logging.basicConfig(level=logging.INFO)
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
+logging.basicConfig(
+    level=logging.INFO,
+    format=LOG_FORMAT,
+    datefmt=DATE_FORMAT,
+    handlers=[logging.StreamHandler()]
+)
 
 def verify_bearer(
     http_auth: Annotated[
@@ -120,22 +125,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # 启动浏览器服务（常驻浏览器）
             from service.browser_service import browser_service
             await browser_service.start()
-            logger.info("浏览器服务已启动")
+            logging.info("浏览器服务已启动")
             # 将浏览器服务绑定到应用实例，方便其他地方访问
             app.state.browser_service = browser_service
             
             yield
     except Exception as e:
-        logger.error(f"Error during database initialization: {e}")
+        logging.error(f"Error during database initialization: {e}")
         raise
     finally:
         # 停止浏览器服务
         try:
             from service.browser_service import browser_service
             await browser_service.stop()
-            logger.info("浏览器服务已停止")
+            logging.info("浏览器服务已停止")
         except Exception as e:
-            logger.error(f"Error stopping browser service: {e}")
+            logging.error(f"Error stopping browser service: {e}")
             
 
 app = FastAPI(
@@ -263,7 +268,7 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
         output.run_id = str(run_id)
         return output
     except Exception as e:
-        logger.error(f"An exception occurred: {e}")
+        logging.error(f"An exception occurred: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 
@@ -323,7 +328,7 @@ async def message_generator(
                     chat_message = langchain_to_chat_message(message)
                     chat_message.run_id = str(run_id)
                 except Exception as e:
-                    logger.error(f"Error parsing message: {e}")
+                    logging.error(f"Error parsing message: {e}")
                     yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'})}\n\n"
                     continue
                 # LangGraph re-sends the input message, which feels weird, so drop it
@@ -349,14 +354,14 @@ async def message_generator(
                     yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)})}\n\n"
     except GeneratorExit:
         # Handle GeneratorExit gracefully
-        logger.info("Stream closed by client")
+        logging.info("Stream closed by client")
         return
     except CancelledError:
         # Handle CancelledError gracefully
-        logger.info("Stream cancelled")
+        logging.info("Stream cancelled")
         return
     except Exception as e:
-        logger.error(f"Error in message generator: {e}")
+        logging.error(f"Error in message generator: {e}")
         yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
     finally:
         yield "data: [DONE]\n\n"
@@ -437,7 +442,7 @@ def history(input: ChatHistoryInput) -> ChatHistory:
         chat_messages: list[ChatMessage] = [langchain_to_chat_message(m) for m in messages]
         return ChatHistory(messages=chat_messages)
     except Exception as e:
-        logger.error(f"An exception occurred: {e}")
+        logging.error(f"An exception occurred: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 
@@ -478,7 +483,7 @@ async def whatsapp_unread_messages():
 @app.post("/whatsapp/contact_chat_list")
 async def whatsapp_contact_chat_list(request: WhatsAppContactInput):
     """WhatsApp contact chat list endpoint."""
-    logger.info(f"WhatsApp contact chat list endpoint: {request.contact_name}")
+    logging.info(f"WhatsApp contact chat list endpoint: {request.contact_name}")
     return await whatsapp.get_contact_chat_list(request.contact_name)
 
 # curl -X POST http://localhost:8080/whatsapp/send_message -H "Content-Type: application/json" -d '{"contact_name": "f.matheoprod@gmail.com", "message": "❤️❤️"}'
@@ -492,20 +497,20 @@ async def whatsapp_send_message(request: WhatsAppMessageInput):
 # @app.get("/test")
 # async def test():
 #     """Main function demonstrating different usage patterns."""
-#     logger.info("=== WhatsApp Web Screenshot Demo ===")
+#     logging.info("=== WhatsApp Web Screenshot Demo ===")
 #     # Option 1: Use the simple function (runs for 2 minutes as demo)
-#     logger.info("Option 1: Using screenshot_whatsapp function")
-#     logger.info("This will run for 2 minutes, taking screenshots every 10 seconds")
-#     logger.info("Press Ctrl+C to stop early")
+#     logging.info("Option 1: Using screenshot_whatsapp function")
+#     logging.info("This will run for 2 minutes, taking screenshots every 10 seconds")
+#     logging.info("Press Ctrl+C to stop early")
     
 #     try:
 #         await screenshot_whatsapp(interval_seconds=10, duration_minutes=2, headless=True)
 #     except KeyboardInterrupt:
-#         logger.info("Demo stopped by user")
+#         logging.info("Demo stopped by user")
 #     except Exception as e:
-#         logger.error(f"Error: {e}", exc_info=True)
+#         logging.error(f"Error: {e}", exc_info=True)
     
-#     logger.info("\nDemo completed!")
+#     logging.info("\nDemo completed!")
 
 
 
@@ -527,7 +532,7 @@ class CustomerServiceInput(BaseModel):
     message: str
     timestamp: Optional[str] = None
     contact_name: Optional[str] = None
-    user_token: Optional[str] = None
+    userToken: Optional[str] = None
     thread_id: Optional[str] = None
 
 
@@ -542,6 +547,9 @@ async def test_customer_service(request: CustomerServiceInput):
         -d '{"message": "How do I place an order?"}'
     ```
     """
+    if not request.userToken:
+        raise HTTPException(status_code=400, detail="userToken is required")
+    
     try:
         # Get customer service agent
         agent = get_agent("customer-service")
@@ -560,7 +568,7 @@ async def test_customer_service(request: CustomerServiceInput):
         }
         
         # Run agent
-        logger.info(f"Customer service get messages: {state['messages']}")
+        logging.info(f"Customer service get messages: {state['messages']}")
         
         thread_id = request.thread_id or str(uuid4())
         
@@ -572,12 +580,12 @@ async def test_customer_service(request: CustomerServiceInput):
                 "configurable": {
                     "model": settings.DEFAULT_MODEL,
                     "thread_id": thread_id,
-                    "user_token": request.user_token
+                    "userToken": request.userToken
                 }
             }
         )
         
-        logger.info(f"Customer service agent result: {result}")
+        logging.info(f"Customer service agent result: {result}")
         
         # Extract results
         ai_reply = result["messages"][-1].content if result.get("messages") else ""
@@ -598,16 +606,16 @@ async def test_customer_service(request: CustomerServiceInput):
 
 # curl -X POST http://localhost:8080/customer-service/user-info \
 #     -H "Content-Type: application/json" \
-#     -d '{"message": "where is my order?", "user_token": "3449ab69-8813-4db5-836c-3b0f047626e3"}'
+#     -d '{"message": "where is my order?", "userToken": "3449ab69-8813-4db5-836c-3b0f047626e3"}'
 
 @app.post("/customer-service/user-info")
 async def get_user_info_endpoint(request: CustomerServiceInput):
     """Get user info endpoint."""
-    logger.info(f"Get user info endpoint: {request}")
+    logging.info(f"Get user info endpoint: {request}")
     
-    if not request.user_token:
-        raise HTTPException(status_code=400, detail="user_token is required")
+    if not request.userToken:
+        raise HTTPException(status_code=400, detail="userToken is required")
     
-    return await get_user_summary(request.user_token)
+    return await get_user_summary(request.userToken)
 
 app.include_router(router)
