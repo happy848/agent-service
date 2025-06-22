@@ -45,6 +45,7 @@ class CustomerServiceState(MessagesState, total=False):
     reasoning_response: Optional[str]  # 推理回答
     humanized_response: Optional[str]  # 拟人回复
     self_check_passed: Optional[bool]  # 自我检查结果
+    check_count: Optional[int]  # 检查次数
 
 
 async def categorize_message(message: str) -> Dict[str, Any]:
@@ -205,8 +206,10 @@ async def reasoning_response(state: CustomerServiceState, config: RunnableConfig
     categories = state.get("categories", {}).get("categories", [])
     backgroundInfo = state.get("backgroundInfo", {})
     
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
     reasoning_prompt = f"""基于以下信息进行深度推理，生成专业、准确的回答：
-
+当前时间：{current_time}
 用户问题：{user_message}
 问题分类：{categories}
 用户背景信息：{backgroundInfo}
@@ -231,14 +234,24 @@ async def reasoning_response(state: CustomerServiceState, config: RunnableConfig
     ]
     
     response = await m.ainvoke(messages, config)
+    
+    # 重置检查次数，开始新的推理
     return {"reasoning_response": response.content}
 
 async def self_check_response(state: CustomerServiceState, config: RunnableConfig) -> CustomerServiceState:
-    """回答自我检查：检查回答是否准确、完整、无幻觉"""
+    """回答自我检查：检查回答是否准确、完整、无幻觉，最多检查2次"""
+    check_count = state.get("check_count", 0)
+    if check_count >= 1:
+        logging.info(f"Self check passed after {check_count} attempts (max limit reached)")
+        return {"self_check_passed": True, "check_count": check_count}
+    
     m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
     
     reasoning_response = state.get("reasoning_response", "")
     user_message = state["messages"][-1].content if state["messages"] else ""
+    
+    # 获取当前检查次数，默认为0
+    
     
     check_prompt = f"""请对以下客服回答进行自我检查：
 
@@ -246,11 +259,10 @@ async def self_check_response(state: CustomerServiceState, config: RunnableConfi
 客服回答：{reasoning_response}
 
 检查标准：
-1. 是否准确回答了用户的问题
-2. 是否有事实错误或幻觉
+1. 是否准确回答了用户的问题,聚焦解决用户当前问题，不要扩展其他问题
+2. 是否有事实错误或幻觉，不要编造事实
 3. 是否违背常识
-4. 是否完整提供了解决方案
-5. 是否基于用户背景信息提供了个性化建议
+4. 不需要检查用户身份，不要询问用户身份，系统会自动获取用户身份和订单信息给之前的模型
 
 请给出检查结果：
 - 如果检查通过，回复"PASS"
@@ -269,9 +281,16 @@ async def self_check_response(state: CustomerServiceState, config: RunnableConfi
     if "PASS" in check_result.upper():
         return {"self_check_passed": True}
     else:
-        # 检查不通过，需要重新推理
-        logging.warning(f"Self check failed: {check_result}")
-        return {"self_check_passed": False, "check_feedback": check_result}
+        # 检查不通过，增加检查次数
+        new_check_count = check_count + 1
+        logging.warning(f"Self check failed (attempt {new_check_count}/2): {check_result}")
+        
+        # 如果达到2次检查，直接通过
+        if new_check_count >= 2:
+            logging.info(f"Self check passed after {new_check_count} attempts (max limit reached)")
+            return {"self_check_passed": True, "check_count": new_check_count}
+        else:
+            return {"self_check_passed": False, "check_feedback": check_result, "check_count": new_check_count}
 
 async def humanize_response(state: CustomerServiceState, config: RunnableConfig) -> CustomerServiceState:
     """拟人回复：将专业回答转换为自然、口语化的语言"""
