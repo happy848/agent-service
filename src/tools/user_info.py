@@ -1,389 +1,257 @@
 """
 用户信息工具模块
 提供与用户信息相关的API请求功能
-支持多实例，每个实例绑定一个user_token
 """
 
 import asyncio
-import json
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
-from datetime import datetime
 
 import aiohttp
-from pydantic import BaseModel, Field
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
 class UserInfoConfig:
     """用户信息配置"""
     api_base: str = "https://agentsben.com/api"
-    bot_token: str = "anodguqSD2#$45680!g#$%^$Yfsdghhrth,.ghDFGeryGhyulFHGJdfgrwadfgdfDFGdfger#$%56dfWEyhj9*h"
+    auth_secret: str = "anodguqSD2#$45680!g#$%^$Yfsdghhrth,.ghDFGeryGhyulFHGJdfgrwadfgdfDFGdfger#$%56dfWEyhj9*h"
     timeout: int = 120
     max_retries: int = 3
 
-class UserInfoResponse(BaseModel):
-    """用户信息响应模型"""
-    success: bool
+# 参考curl命令（正确格式）:
+# curl 'https://agentsben.com/api/bot/user/info' \
+#   -H 'Accept: application/json, text/plain, */*' \
+#   -H 'Accept-Language: zh-CN,zh;q=0.9,en;q=0.8' \
+#   -H 'Authorization: Bearer anodguqSD2#$45680!g#$%^$Yfsdghhrth,.ghDFGeryGhyulFHGJdfgrwadfgdfDFGdfger#$%56dfWEyhj9*h' \
+#   -H 'Content-Type: application/json' \
+#   -b 'x-hng=lang=zh-CN&domain=agentsben.com; _ga=GA1.1.1447635580.1746716198; _ga_J2FQXJQXWZ=GS2.1.s1747277037$o9$g1$t1747277972$j0$l0$h0' \
+#   -H 'Origin: https://agentsben.com' \
+#   -H 'Proxy-Connection: keep-alive' \
+#   -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36' \
+#   -d '{"userToken":"3449ab69-8813-4db5-836c-3b0f047626e3"}' \
+#   --insecure
+  
+# {"success":true,"data":{"email":"ben-service@agentsben.com","email_verification":true,"currency_unit":"EUR","balance_cny":"211.87","vip_level":0,"service_rate":0.08,"created_at":"2025-03-13T08:33:45.000Z","updated_at":"2025-04-29T12:26:08.000Z"}}
+
+# 全局默认配置
+DEFAULT_CONFIG = UserInfoConfig()
+
+
+async def _make_request(
+    userToken: str,
+    method: str, 
+    endpoint: str, 
     data: Optional[Dict[str, Any]] = None
-    message: Optional[str] = None
-
-
-class UserOrdersResponse(BaseModel):
-    """用户订单响应模型"""
-    success: bool
-    data: Optional[Dict[str, Any]] = None
-    message: Optional[str] = None
-
-
-class UserParcelsResponse(BaseModel):
-    """用户包裹响应模型"""
-    success: bool
-    data: Optional[List[Any]] = None
-    message: Optional[str] = None
-
-
-class UserInfoClient:
-    """用户信息客户端 - 支持多实例，每个实例绑定一个user_token"""
-    
-    def __init__(
-        self, 
-        user_token: str,
-    ):
-        """
-        初始化用户信息客户端
-        
-        Args:
-            user_token: 用户token，绑定到此实例
-        """
-        self.user_token = user_token
-        self.config = UserInfoConfig()  # 使用默认配置
-        self.session: Optional[aiohttp.ClientSession] = None
-        self._is_closed = False
-    
-    async def __aenter__(self):
-        """异步上下文管理器入口"""
-        await self._ensure_session()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """异步上下文管理器出口"""
-        await self.close()
-    
-    async def _ensure_session(self):
-        """确保session已创建"""
-        if self.session is None and not self._is_closed:
-            self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.config.timeout),
-                headers={
-                    "Content-Type": "application/json"
-                }
-            )
-    
-    async def close(self):
-        """关闭客户端连接"""
-        if self.session and not self._is_closed:
-            await self.session.close()
-            self._is_closed = True
-    
-    async def _make_request(
-        self, 
-        method: str, 
-        endpoint: str, 
-        data: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        基础请求函数
-        
-        Args:
-            method: HTTP方法
-            endpoint: API端点
-            data: 请求数据
-            
-        Returns:
-            响应数据字典
-            
-        Raises:
-            Exception: 请求失败异常
-        """
-        await self._ensure_session()
-        
-        if self._is_closed:
-            raise RuntimeError("Client is closed")
-        
-        url = f"{self.config.api_base}{endpoint}"
-        
-        # 构建请求头，将userToken放在Authorization中
-        headers = {
-            "Authorization": f"Bearer {self.user_token}",
-            "Content-Type": "application/json"
-        }
-        
-        # 请求数据不需要包含userToken
-        request_data = data or {}
-        
-        try:
-            async with self.session.request(
-                method=method,
-                url=url,
-                headers=headers,
-                json=request_data
-            ) as response:
-                response.raise_for_status()
-                result = await response.json()
-                logger.info(f"Request result: {result}")
-                return result
-                
-        except Exception as e:
-            logger.error(f"Unexpected error in request: {e}", exc_info=True)
-            raise
-    
-    async def get_user_info(self):
-        """
-        获取当前用户的基本信息
-        
-        Returns:
-            用户基本信息
-        """
-        result = await self._make_request("POST", "/bot/user/info")
-        return result
-    
-    async def get_user_orders(
-        self, 
-        status_alias: Optional[str] = None
-    ) -> List[Any]:
-        """
-        获取当前用户的订单信息
-        
-        Args:
-            status_alias: 订单状态别名，可选值：
-                - 'WaitingForPayment': 等待付款
-                - 'ShippingToWarehouse': 发往仓库
-                - 'InWarehouse': 在仓库中
-                - 'ShippingToMyAddress': 发往我的地址
-                - 'Refunding': 退款中
-                - 'Refunded': 已退款
-                - 'Progressing': 处理中（包含多个状态）
-                
-        Returns:
-            订单列表
-        """
-        data = {}
-        if status_alias:
-            data["status_alias"] = status_alias
-            
-        result = await self._make_request("POST", "/bot/user/orders", data)
-        return result
-    
-    async def get_user_parcels(self) -> List[Any]:
-        """
-        获取当前用户的包裹信息
-        
-        Returns:
-            包裹列表（默认最近10个）
-        """
-        return await self._make_request("POST", "/bot/user/parcels")
-    
-    async def get_user_summary(self) -> Dict[str, Any]:
-        """
-        获取用户信息摘要（包含基本信息、订单统计、包裹统计）
-        
-        Returns:
-            用户信息摘要
-        """
-        try:
-            # 并行获取所有信息
-            user_info_task = self.get_user_info()
-            orders_task = self.get_user_orders()
-            parcels_task = self.get_user_parcels()
-            
-            user_info, orders, parcels = await asyncio.gather(
-                user_info_task, orders_task, parcels_task
-            )
-            
-            # 按状态统计订单
-            order_stats = {}
-            for order in orders:
-                status = order.status_alias
-                order_stats[status] = order_stats.get(status, 0) + 1
-            
-            return {
-                "user_info": user_info,
-                "order_stats": order_stats,
-                "total_orders": len(orders),
-                "total_parcels": len(parcels),
-                "orders": orders,
-                "parcels": parcels
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get user summary: {e}")
-            raise
-
-
-class UserInfoManager:
-    """用户信息管理器 - 管理多个用户客户端实例"""
-    
-    def __init__(self):
-        """
-        初始化用户信息管理器
-        """
-        self.config = UserInfoConfig()  # 使用默认配置
-        self._clients: Dict[str, UserInfoClient] = {}
-    
-    def get_client(self, user_token: str) -> UserInfoClient:
-        """
-        获取或创建用户客户端实例
-        
-        Args:
-            user_token: 用户token
-            
-        Returns:
-            用户客户端实例
-        """
-        if user_token not in self._clients:
-            self._clients[user_token] = UserInfoClient(user_token)
-        
-        return self._clients[user_token]
-    
-    async def close_all(self):
-        """关闭所有客户端连接"""
-        for client in self._clients.values():
-            await client.close()
-        self._clients.clear()
-    
-    async def __aenter__(self):
-        """异步上下文管理器入口"""
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """异步上下文管理器出口"""
-        await self.close_all()
-
-
-# 便捷函数 - 使用单例模式
-_manager: Optional[UserInfoManager] = None
-
-
-def get_manager() -> UserInfoManager:
+) -> Dict[str, Any]:
     """
-    获取全局用户信息管理器实例
-    
-    Returns:
-        用户信息管理器实例
-    """
-    global _manager
-    if _manager is None:
-        _manager = UserInfoManager()
-    return _manager
-
-
-async def get_user_info(user_token: str):
-    """
-    便捷函数：获取用户基本信息
+    基础请求函数
     
     Args:
-        user_token: 用户token
+        userToken: 用户token
+        method: HTTP方法
+        endpoint: API端点
+        data: 请求数据
+            
+    Returns:
+        响应数据字典
+        
+    Raises:
+        Exception: 请求失败异常
+    """
+    url = f"{DEFAULT_CONFIG.api_base}{endpoint}"
+    
+    # 构建请求头，根据curl命令添加完整的headers
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Authorization": f"Bearer {DEFAULT_CONFIG.auth_secret}",
+        "Content-Type": "application/json",
+        "Origin": "https://agentsben.com",
+        "Proxy-Connection": "keep-alive",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+    }
+    
+    # 请求数据包含userToken
+    request_data = data or {}
+    request_data["userToken"] = userToken
+    
+    timeout = aiohttp.ClientTimeout(total=DEFAULT_CONFIG.timeout)
+    
+    # 添加调试信息
+    logging.info(f"Making request to: {url}")
+    logging.info(f"Method: {method}")
+    logging.info(f"Headers: {headers}")
+    logging.info(f"Request data: {request_data}")
+    
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    json=request_data
+                ) as response:
+                    logging.info(f"Response status: {response.status}")
+                    logging.info(f"Response headers: {dict(response.headers)}")
+                    
+                    response.raise_for_status()
+                    result = await response.json()
+                    logging.info(f"Request result: {result}")
+                    
+                    # 检查响应是否包含错误信息
+                    if isinstance(result, dict) and result.get('message') == 'Error occurred.':
+                        logging.error(f"API returned error for endpoint {endpoint}: {result}")
+                        # 尝试获取更详细的错误信息
+                        error_details = result.get('details', result.get('error', 'Unknown error'))
+                        raise Exception(f"API Error: {error_details}")
+                    
+                    # 检查响应是否包含错误状态
+                    if isinstance(result, dict) and result.get('error'):
+                        logging.error(f"API returned error for endpoint {endpoint}: {result}")
+                        raise Exception(f"API Error: {result.get('error', 'Unknown error')}")
+                    
+                    return result
+                    
+            except aiohttp.ClientResponseError as e:
+                logging.error(f"HTTP error in _make_request: {e.status} - {e.message}")
+                # 尝试读取错误响应体
+                try:
+                    error_body = await e.response.text()
+                    logging.error(f"Error response body: {error_body}")
+                except:
+                    pass
+                raise Exception(f"HTTP Error {e.status}: {e.message}")
+            except aiohttp.ClientError as e:
+                logging.error(f"Client error in _make_request: {e}")
+                raise Exception(f"Client Error: {str(e)}")
+            except Exception as e:
+                logging.error(f"Unexpected error in _make_request: {e}", exc_info=True)
+                raise
+                
+    except Exception as e:
+        logging.error(f"Unexpected error in request: {e}", exc_info=True)
+        raise
+
+
+async def get_user_info(userToken: str):
+    """
+    获取当前用户的基本信息
+    
+    Args:
+        userToken: 用户token
         
     Returns:
         用户基本信息
     """
-    manager = get_manager()
-    client = manager.get_client(user_token)
-    async with client:
-        return await client.get_user_info()
+    try:
+        # 首先尝试POST方法
+        return await _make_request(userToken, "POST", "/bot/user/info")
+    except Exception as e:
+        logging.warning(f"POST request failed, trying GET: {e}")
+        try:
+            # 如果POST失败，尝试GET方法
+            return await _make_request(userToken, "GET", "/bot/user/info")
+        except Exception as e2:
+            logging.error(f"All methods failed for user info: {e2}")
+            # 返回一个默认的用户信息结构，避免完全失败
+            return {
+                "error": f"API Error: {str(e2)}",
+                "user_info": {
+                    "id": None,
+                    "name": "Unknown User",
+                    "email": None,
+                    "status": "error"
+                }
+            }
 
 
 async def get_user_orders(
-    user_token: str, 
+    userToken: str, 
     status_alias: Optional[str] = None
 ) -> List[Any]:
     """
-    便捷函数：获取用户订单信息
+    获取当前用户的订单信息
     
     Args:
-        user_token: 用户token
-        status_alias: 订单状态别名
-        
+        userToken: 用户token
+        status_alias: 订单状态别名，可选值：
+            - 'WaitingForPayment': 等待付款
+            - 'ShippingToWarehouse': 发往仓库
+            - 'InWarehouse': 在仓库中
+            - 'ShippingToMyAddress': 发往我的地址
+            - 'Refunding': 退款中
+            - 'Refunded': 已退款
+            - 'Progressing': 处理中（包含多个状态）
+            
     Returns:
         订单列表
     """
-    manager = get_manager()
-    client = manager.get_client(user_token)
-    async with client:
-        return await client.get_user_orders(status_alias)
+    try:
+        data = {}
+        if status_alias:
+            data["status_alias"] = status_alias
+            
+        return await _make_request(userToken, "POST", "/bot/user/orders", data)
+    except Exception as e:
+        logging.error(f"Failed to get user orders for token {userToken[:10]}...: {e}")
+        # 返回空列表作为fallback
+        return []
 
 
-async def get_user_parcels(
-    user_token: str
-) -> List[Any]:
+async def get_user_parcels(userToken: str) -> List[Any]:
     """
-    便捷函数：获取用户包裹信息
+    获取当前用户的包裹信息
     
     Args:
-        user_token: 用户token
+        userToken: 用户token
         
     Returns:
-        包裹列表
+        包裹列表（默认最近10个）
     """
-    manager = get_manager()
-    client = manager.get_client(user_token)
-    async with client:
-        return await client.get_user_parcels()
-
-
-# 使用示例
-async def example_usage():
-    """使用示例"""
-    
-    # 方式1：使用管理器管理多个用户
-    async with UserInfoManager() as manager:
-        # 用户1
-        client1 = manager.get_client("user_token_1")
-        async with client1:
-            user_info1 = await client1.get_user_info()
-            orders1 = await client1.get_user_orders("Progressing")
-            print(f"用户1 - 邮箱: {user_info1.email}, 处理中订单: {len(orders1)}")
-        
-        # 用户2
-        client2 = manager.get_client("user_token_2")
-        async with client2:
-            summary2 = await client2.get_user_summary()
-            print(f"用户2 - 总订单: {summary2['total_orders']}, 总包裹: {summary2['total_parcels']}")
-    
-    # 方式2：使用便捷函数
     try:
-        user_info = await get_user_info("user_token_3")
-        print(f"用户3 - VIP等级: {user_info.vip_level}")
+        return await _make_request(userToken, "POST", "/bot/user/parcels")
+    except Exception as e:
+        logging.error(f"Failed to get user parcels for token {userToken[:10]}...: {e}")
+        # 返回空列表作为fallback
+        return []
+
+
+async def get_user_summary(userToken: str) -> Dict[str, Any]:
+    """
+    获取用户信息摘要（包含基本信息、订单统计、包裹统计）
+    
+    Args:
+        userToken: 用户token
         
-        orders = await get_user_orders("user_token_3", "InWarehouse")
-        print(f"用户3 - 在仓库订单: {len(orders)}")
+    Returns:
+        用户信息摘要
+    """
+    try:
+        # 并行获取所有信息
+        logging.info(f"get_user_summary userToken: {userToken}")
+        
+        # 使用return_exceptions=True来避免一个失败导致全部失败
+        results = await asyncio.gather(
+            get_user_info(userToken),
+            get_user_orders(userToken),
+            get_user_parcels(userToken),
+            return_exceptions=True
+        )
+        
+        user_info, orders, parcels = results
+        
+        logging.info(f"get_user_summary user_info: {user_info}")
+        logging.info(f"get_user_summary orders: {orders}")
+        logging.info(f"parcels {parcels}")
+       
+        return {
+            "user_info": user_info,
+            "orders": orders,
+            "parcels": parcels
+        }
         
     except Exception as e:
-        print(f"错误: {e}")
-
-
-async def example_multiple_users():
-    """多用户并发处理示例"""
-    user_tokens = ["token1", "token2", "token3", "token4", "token5"]
-    
-    async with UserInfoManager() as manager:
-        # 并发获取多个用户的信息
-        tasks = []
-        for token in user_tokens:
-            client = manager.get_client(token)
-            task = asyncio.create_task(client.get_user_info())
-            tasks.append((token, task))
-        
-        # 等待所有任务完成
-        results = {}
-        for token, task in tasks:
-            try:
-                user_info = await task
-                results[token] = user_info
-                print(f"用户 {token}: {user_info.email} - VIP{user_info.vip_level}")
-            except Exception as e:
-                print(f"用户 {token} 获取失败: {e}")
+        logging.error(f"Failed to get user summary: {e}", exc_info=True)
+        raise

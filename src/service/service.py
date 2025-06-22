@@ -47,12 +47,15 @@ from service.utils import (
     performance_metrics,
 )
 
-from tools.user_info import get_user_info
+from tools.user_info import get_user_summary
 
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
-logger = logging.getLogger(__name__)
 
+
+logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
@@ -517,7 +520,7 @@ class CustomerServiceResponse(BaseModel):
 
 # curl -X POST http://localhost:8080/customer-service/test \
 #     -H "Content-Type: application/json" \
-#     -d '{"message": "where is my order?", "userToken": "30df16e1-b9bc-4a51-b661-e17d36cd2de3"}'
+#     -d '{"message": "where is my order?", "userToken": "3449ab69-8813-4db5-836c-3b0f047626e3"}'
 
 class CustomerServiceInput(BaseModel):
     """Customer service input model."""
@@ -595,7 +598,8 @@ async def test_customer_service(request: CustomerServiceInput):
 
 # curl -X POST http://localhost:8080/customer-service/user-info \
 #     -H "Content-Type: application/json" \
-#     -d '{"message": "where is my order?", "user_token": "30df16e1-b9bc-4a51-b661-e17d36cd2de3"}'
+#     -d '{"message": "where is my order?", "user_token": "3449ab69-8813-4db5-836c-3b0f047626e3"}'
+
 @app.post("/customer-service/user-info")
 async def get_user_info_endpoint(request: CustomerServiceInput):
     """Get user info endpoint."""
@@ -604,6 +608,6 @@ async def get_user_info_endpoint(request: CustomerServiceInput):
     if not request.user_token:
         raise HTTPException(status_code=400, detail="user_token is required")
     
-    return await get_user_info(request.user_token)
+    return await get_user_summary(request.user_token)
 
 app.include_router(router)

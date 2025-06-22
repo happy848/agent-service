@@ -19,7 +19,7 @@ from langgraph.graph import END, MessagesState, StateGraph, START
 
 from core import get_model, settings
 from schema import ChatMessage
-from tools.user_info import get_user_info, get_user_orders, get_user_parcels
+from tools.user_info import get_user_summary, get_user_orders, get_user_parcels
 
 import logging
 logger = logging.getLogger(__name__)
@@ -151,7 +151,8 @@ async def get_user_information(state: CustomerServiceState, config: RunnableConf
             }
         
         # 获取用户信息
-        user_info = await get_user_info(user_token)
+        user_info = await get_user_summary(user_token)
+        
         logger.info(f"User token: {user_token}")
         logger.info(f"User info: {user_info}")
         
