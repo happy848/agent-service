@@ -47,6 +47,7 @@ from service.utils import (
     performance_metrics,
 )
 
+from tools.api_taobao import api_taobao
 from tools.user_info import get_user_summary
 
 # 导入WhatsApp模块
@@ -617,5 +618,21 @@ async def get_user_info_endpoint(request: CustomerServiceInput):
         raise HTTPException(status_code=400, detail="userToken is required")
     
     return await get_user_summary(request.userToken)
+
+# curl -X POST http://localhost:8080/customer-service/get-product-info \
+#     -H "Content-Type: application/json" \
+#     -d '{"product_id": "655280629872", "platform": "TAOBAO"}'
+
+class GetProductInfoInput(BaseModel):
+    """Get product info input model."""
+    product_id: str
+    platform: str
+
+
+@app.post("/customer-service/get-product-info")
+async def get_product_info(request: GetProductInfoInput):
+    """Get product info endpoint."""
+    logging.info(f"Get product info endpoint: {request}")
+    return await api_taobao.get_product_info(request.product_id, request.platform)
 
 app.include_router(router)

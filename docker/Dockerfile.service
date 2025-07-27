@@ -12,7 +12,6 @@ COPY src/schema/ ./schema/
 COPY src/service/ ./service/
 COPY src/tools/ ./tools/
 COPY src/brain/ ./brain/
-COPY src/tasks/ ./tasks/
 COPY src/run_service.py .
 
 CMD ["python", "run_service.py"]

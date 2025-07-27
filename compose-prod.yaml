@@ -1,0 +1,22 @@
+services:
+  agent_service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+    ports:
+      - "18080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./docker:/app/docker
+ 
+  streamlit_app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.app
+    ports:
+      - "18501:8501"
+    depends_on:
+      - agent_service
+    environment:
+      - AGENT_URL=http://agent_service:8080
