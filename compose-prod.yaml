@@ -1,8 +1,13 @@
+name: agent-service-prod
+
 services:
   agent_service:
+    container_name: agent-service-prod-agent
     build:
       context: .
       dockerfile: docker/Dockerfile.service
+      tags:
+        - agent-service-prod:latest
     ports:
       - "18080:8080"
     env_file:
@@ -11,9 +16,12 @@ services:
       - ./docker:/app/docker
  
   streamlit_app:
+    container_name: agent-service-prod-streamlit
     build:
       context: .
       dockerfile: docker/Dockerfile.app
+      tags:
+        - streamlit-app-prod:latest
     ports:
       - "18501:8501"
     depends_on:

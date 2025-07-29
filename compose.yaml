@@ -1,5 +1,8 @@
+name: agent-service-dev
+
 services:
   agent_service:
+    container_name: agent-service-dev-agent
     build:
       context: .
       dockerfile: docker/Dockerfile.service
@@ -40,6 +43,7 @@ services:
           target: /app/tasks/
 
   streamlit_app:
+    container_name: agent-service-dev-streamlit
     build:
       context: .
       dockerfile: docker/Dockerfile.app
