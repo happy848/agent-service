@@ -124,11 +124,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 agent.checkpointer = saver
             
             # 启动浏览器服务（常驻浏览器）
-            from service.browser_service import browser_service
-            await browser_service.start()
-            logging.info("浏览器服务已启动")
-            # 将浏览器服务绑定到应用实例，方便其他地方访问
-            app.state.browser_service = browser_service
+            from client.whatsapp_client import global_whatsapp_client
+            await global_whatsapp_client.start()
             
             yield
     except Exception as e:
@@ -137,8 +134,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     finally:
         # 停止浏览器服务
         try:
-            from service.browser_service import browser_service
-            await browser_service.stop()
+            from client.whatsapp_client import global_whatsapp_client
+            await global_whatsapp_client.stop()
             logging.info("浏览器服务已停止")
         except Exception as e:
             logging.error(f"Error stopping browser service: {e}")

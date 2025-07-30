@@ -9,7 +9,7 @@ docker compose -f compose-prod.yaml down
 docker rm -f prod-agent-service prod-streamlit-app 2>/dev/null || true
 
 echo "启动生产环境..."
-docker compose -f compose-prod.yaml up -d
+docker compose -f compose-prod.yaml up -d --build
 
 echo "✅ 生产环境已启动"
 echo "📊 Agent Service: http://localhost:18080"

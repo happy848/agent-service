@@ -20,9 +20,11 @@ from uuid import uuid4
 
 from client.browser_client import BrowserManager
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from agents.customer_service_agent import customer_service_agent
 
 from playwright.async_api import Page
+
+from client.models import MessageItem
+from client.whatsapp_client_handler import handle_customer_message
 
 
 # Configure logger
@@ -36,13 +38,6 @@ if not logger.handlers:
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-
-class MessageItem(BaseModel):
-    type: Literal["received", "sent"] = Field(description="Type of the message.")
-    sender: str = Field(description="Sender of the message.")
-    content: str = Field(description="Content of the message.")
-    datetime: str = Field(description="Datetime of the message.")
-    timestamp: str = Field(description="Timestamp of the message.")
 
 class TaskType(Enum):
     """Task type enumeration"""
@@ -120,7 +115,6 @@ class WhatsAppBrowserClient:
         self.monitor_interval = monitor_interval
         self.monitor: Optional['WhatsAppMonitor'] = None
         self._monitoring_task: Optional[asyncio.Task] = None
-        self.customer_service_agent = customer_service_agent
         
         # Continue button check tracking
         self._continue_check_attempts = 0
@@ -140,9 +134,12 @@ class WhatsAppBrowserClient:
         await self.close()
         
     async def start(self):
-        return
         """Start the browser and navigate to WhatsApp Web."""
         # Start browser manager
+        if os.getenv('ENV_MODE') != 'prod':
+            return
+
+        # Start the browser manager first
         await self.browser_manager.start()
         
         # Create new page with anti-detection
@@ -150,10 +147,17 @@ class WhatsAppBrowserClient:
         
         await self.goto_whatsapp_web()
         
+        await self._start_monitoring()
+        
         await self.page.wait_for_timeout(3000)
         await self.take_screenshot("wa_start_after")
-        # Removed redundant unread messages check since monitor will handle this
-        logger.info("WhatsApp client started successfully")
+        # Handle new WhatsApp Web interface modal dialog and other UI changes
+        await self._handle_whatsapp_ui_changes()
+        
+        await self.page.wait_for_timeout(3000)
+        await self.take_screenshot("wa_start_after_2")
+        
+        await self._save_conversation_html_to_log(self.page)
         
     async def goto_whatsapp_web(self):
         """Navigate to WhatsApp Web."""
@@ -168,19 +172,128 @@ class WhatsAppBrowserClient:
             await self.page.goto(whats_app_web_url)
             await self.page.wait_for_load_state('networkidle')
         else:
-            logger.info("Already on WhatsApp Web")
             return self.page
-        
-        logger.info("Browser started and navigated to WhatsApp Web")
-        if not self.browser_manager.headless:
-            logger.info("Please scan the QR code if not already logged in...")
-        else:
-            logger.info("Note: Running in headless mode. QR code scanning requires pre-authenticated session.")
         
         await self.page.wait_for_timeout(5000)
 
-        await self._start_monitoring()
-        
+    async def _handle_whatsapp_modal_dialog(self):
+        """
+        Handle the new WhatsApp Web interface modal dialog that appears when the interface changes.
+        This handles the dialog with title "WhatsApp 网页版焕然一新" and "继续" button.
+        """
+        try:
+            # Wait for the modal dialog to appear (if it exists)
+            await self.page.wait_for_timeout(2000)
+            
+            # Try multiple selectors for the continue button in the new interface
+            continue_button_selectors = [
+                'text=继续',
+                '[data-testid="modal-continue-button"]',
+                'button:has-text("继续")',
+                '[role="button"]:has-text("继续")',
+                'div[role="button"]:has-text("继续")',
+                '//button[contains(text(), "继续")]',
+                '//div[contains(text(), "继续")]',
+                '[aria-label*="继续"]',
+                '[title*="继续"]'
+            ]
+            
+            modal_dialog_selectors = [
+                '[data-testid="modal-dialog"]',
+                '[role="dialog"]',
+                '.modal',
+                '[class*="modal"]',
+                '[class*="dialog"]',
+                'div[class*="Modal"]',
+                'div[class*="Dialog"]'
+            ]
+            
+            # Check if modal dialog exists
+            modal_found = False
+            for selector in modal_dialog_selectors:
+                try:
+                    modal_element = await self.page.wait_for_selector(selector, timeout=3000)
+                    if modal_element:
+                        modal_found = True
+                        logger.info(f"Found WhatsApp modal dialog with selector: {selector}")
+                        break
+                except Exception:
+                    continue
+            
+            if not modal_found:
+                logger.info("No WhatsApp modal dialog found, continuing normally")
+                return
+            
+            # Try to click the continue button
+            for selector in continue_button_selectors:
+                try:
+                    # Wait a bit for the button to be clickable
+                    await self.page.wait_for_timeout(1000)
+                    
+                    # Check if button exists and is visible
+                    button = await self.page.wait_for_selector(selector, timeout=100)
+                    if button:
+                        # Check if button is visible and clickable
+                        is_visible = await button.is_visible()
+                        if is_visible:
+                            # Move mouse to button and click
+                            await button.hover()
+                            await self.page.wait_for_timeout(200)
+                            await button.click()
+                            logger.info(f"Successfully clicked continue button with selector: {selector}")
+                            break
+                except Exception as e:
+                    logger.debug(f"Failed to click button with selector {selector}: {e}")
+                    continue
+            
+        except Exception as e:
+            logger.error(f"Error handling WhatsApp modal dialog: {e}")
+            # Continue execution even if modal handling fails
+    
+    async def _handle_whatsapp_ui_changes(self):
+        """
+        Handle various WhatsApp Web UI changes and popups that might appear.
+        This includes the new interface modal, cookie notices, and other dialogs.
+        """
+        try:
+            # Handle the new interface modal dialog
+            await self._handle_whatsapp_modal_dialog()
+            
+            # Handle cookie consent dialogs
+            await self._handle_cookie_consent()
+            
+        except Exception as e:
+            logger.error(f"Error handling WhatsApp UI changes: {e}")
+    
+    async def _handle_cookie_consent(self):
+        """Handle cookie consent dialogs if they appear."""
+        try:
+            cookie_button_selectors = [
+                'text=Accept',
+                'text=Accept All',
+                'text=同意',
+                'text=接受',
+                '[data-testid="cookie-accept"]',
+                'button:has-text("Accept")',
+                'button:has-text("同意")',
+                '[class*="cookie"] button',
+                '[class*="consent"] button'
+            ]
+            
+            for selector in cookie_button_selectors:
+                try:
+                    button = await self.page.wait_for_selector(selector, timeout=100)
+                    if button and await button.is_visible():
+                        await button.click()
+                        logger.info(f"Clicked cookie consent button: {selector}")
+                        break
+                except Exception:
+                    continue
+                    
+        except Exception as e:
+            logger.debug(f"Error handling cookie consent: {e}")
+    
+ 
     async def close(self):
         """Close the browser and cleanup."""
         # Stop monitoring if running
@@ -246,22 +359,29 @@ class WhatsAppBrowserClient:
         for contact_message in unread_contact_messages:
             if can_auto_replay_contact_message(contact_message.sender):
                 # Use the new customer service agent to handle messages
-                reply = await self.handle_customer_message(contact_message)
+                recently_messages = await self.get_contact_chat_list(contact_message.sender)
+                recently_messages_dict = [message.model_dump() for message in recently_messages]
+        
+                latest_message = recently_messages_dict[-1]
+                logger.info('----------------1----------------')
+                logger.info(f"Handling Latest message: {latest_message}")
+                reply = await handle_customer_message(recently_messages_dict)
                 if reply['success']:
-                    # Send each message separately
                     messages_to_send = reply['ai_reply_message']
-                    if isinstance(messages_to_send, str):
-                        messages_to_send = [messages_to_send]
+                    messages_to_send = [x.strip() for x in messages_to_send.split('\n') if x.strip()]
                     
+                    logger.info('----------------2----------------')
+                    logger.info(f"Messages to send: {messages_to_send}")
+                    if len(messages_to_send) == 0:
+                        logger.error(f"No messages to send for contact: {contact_message.sender}")
+                        continue
                     for message in messages_to_send:
                         await self.send_message_to_contact(contact_message.sender, message)
                         # Add a small delay between messages
-                        await self.page.wait_for_timeout(random.randint(500, 1500))
+                        await self.page.wait_for_timeout(random.randint(100, 500))
                 else:
                     logger.error(f"Failed to generate reply: {reply['error']}")
         
-        logger.info(f"check_unread_messages: {unread_contact_messages}")
-
         return unread_contact_messages
             
     async def take_screenshot(self, filename_prefix: str = "") -> str:
@@ -288,46 +408,9 @@ class WhatsAppBrowserClient:
             type='png'
         )
         
-        # Clean up old screenshots (delete files older than 10 minutes)
-        await self._cleanup_old_screenshots(images_dir, filename_prefix)
-        
         return str(filepath)
     
-    async def _cleanup_old_screenshots(self, images_dir: Path, filename_prefix: str = "wa"):
-        """Clean up screenshot files older than 10 minutes."""
-        try:
-            current_time = datetime.now()
-            cutoff_time = current_time.timestamp() - 600  # 10 minutes = 600 seconds
-            
-            deleted_count = 0
-            
-            # Find all screenshot files with the given prefix
-            pattern = f"{filename_prefix}_*.png"
-            screenshot_files = list(images_dir.glob(pattern))
-            
-            for file_path in screenshot_files:
-                try:
-                    # Get file creation time
-                    file_stat = file_path.stat()
-                    file_creation_time = file_stat.st_mtime  # Use modification time as creation time
-                    
-                    # Check if file is older than 10 minutes
-                    if file_creation_time < cutoff_time:
-                        file_path.unlink()  # Delete the file
-                        deleted_count += 1
-                        logger.debug(f"Deleted old screenshot: {file_path.name}")
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to delete old screenshot {file_path.name}: {e}")
-                    
-            if deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} old screenshot(s)")
-            else:
-                logger.debug("No old screenshots to clean up")
-                
-        except Exception as e:
-            logger.error(f"Error during screenshot cleanup: {e}")
-    
+  
     async def get_target_contact_chat_active(self, target_contact: str) -> Dict[str, Any]:
         """
         Activate (switch to) the chat for a specific contact.
@@ -373,7 +456,6 @@ class WhatsAppBrowserClient:
             
             # If current chat matches target, we're already in the right chat
             if current_contact_name and self._is_contact_match(current_contact_name, target_contact):
-                logger.info(f"Target contact is already active: {current_contact_name}")
                 result["success"] = True
                 result["contact_found"] = True
                 result["method_used"] = "current_chat"
@@ -383,14 +465,12 @@ class WhatsAppBrowserClient:
             # Step 2: Try to find contact in chat list
             contact_info = await self._find_contact_in_chat_list(target_contact)
             if contact_info:
-                logger.info(f"Found contact in chat list: {contact_info['name']}")
                 result["method_used"] = "chat_list"
                 result["contact_name"] = contact_info['name']
             else:
                 # Step 3: Search for contact
                 search_result = await self._search_and_select_contact(target_contact)
                 if search_result["success"]:
-                    logger.info(f"Found contact through search: {search_result['contact_name']}")
                     result["method_used"] = "search"
                     result["contact_name"] = search_result["contact_name"]
                     # After search, the contact should be selected, no need to click again
@@ -744,7 +824,6 @@ class WhatsAppBrowserClient:
         Returns:
             True if contacts match, False otherwise
         """
-        logger.info(f"--------------------------------")
         logger.info(f"Checking if {current_contact} matches {target_contact}")
         if not current_contact or not target_contact:
             return False
@@ -791,6 +870,7 @@ class WhatsAppBrowserClient:
             # Wait for chat list to be visible - try multiple selectors
             chat_list_selectors = [
                 '#pane-side',
+                '[aria-label="聊天列表"]',
                 '[aria-label="对话列表"]',
                 '[aria-label="Chat list"]', 
             ]
@@ -859,15 +939,10 @@ class WhatsAppBrowserClient:
             
             logger.info(f"Contact '{target_contact}' not found in chat list")
             
-            await self.take_screenshot()
-            await self._save_conversation_html_to_log()
             return None
             
         except Exception as e:
             logger.error(f"Error finding contact in chat list: {e}")
-            
-            await self.take_screenshot()
-            await self._save_conversation_html_to_log()
             
             return None
 
@@ -1112,7 +1187,6 @@ class WhatsAppBrowserClient:
             logger.info(f"Sent message: {message}")
 
             # Save conversation HTML for debugging
-            await self._save_conversation_html_to_log()
 
             result["success"] = True
             logger.info(f"Successfully sent message: {message}")
@@ -1124,7 +1198,7 @@ class WhatsAppBrowserClient:
         
         return result
   
-    async def _save_conversation_html_to_log(self):
+    async def _save_conversation_html_to_log(self, page):
         """
         Save conversation list HTML content to log file for debugging.
         """
@@ -1140,49 +1214,15 @@ class WhatsAppBrowserClient:
             filename = f"{reverse_timestamp}_wa_conversation_list_raw.html"
             html_filepath = logs_dir / filename
             
+            html_content = await page.content()
             with open(html_filepath, 'w', encoding='utf-8') as f:
-                f.write(await self.page.html())
+                f.write(html_content)
             
             logger.info(f"Saved conversation HTML debug file: {html_filepath}")
-            
-            await self._cleanup_old_debug_files(logs_dir)
             
         except Exception as e:
             logger.error(f"Error saving conversation HTML to log: {e}", exc_info=True)
     
-    async def _cleanup_old_debug_files(self, logs_dir: Path):
-        """Clean up debug HTML files older than 1 hour."""
-        try:
-            current_time = datetime.now()
-            cutoff_time = current_time.timestamp() - 3600  # 1 hour = 3600 seconds
-            
-            deleted_count = 0
-            
-            # Find all debug HTML files
-            debug_patterns = ["whatsapp_debug_*.html", "conversation_list_raw_*.html"]
-            
-            for pattern in debug_patterns:
-                debug_files = list(logs_dir.glob(pattern))
-                
-                for file_path in debug_files:
-                    try:
-                        file_stat = file_path.stat()
-                        file_creation_time = file_stat.st_mtime
-                        
-                        if file_creation_time < cutoff_time:
-                            file_path.unlink()
-                            deleted_count += 1
-                            logger.debug(f"Deleted old debug file: {file_path.name}")
-                            
-                    except Exception as e:
-                        logger.warning(f"Failed to delete old debug file {file_path.name}: {e}")
-                        
-            if deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} old debug file(s)")
-                
-        except Exception as e:
-            logger.error(f"Error during debug file cleanup: {e}")
-
     async def human_like_input(self, element_or_selector, text: str, clear_first: bool = True, press_enter: bool = True) -> bool:
         """
         通用的人类化输入方法，模拟真实用户的输入行为
@@ -1292,9 +1332,6 @@ class WhatsAppBrowserClient:
             # 更新当前对话信息缓存
             self._current_chat_info = current_chat_info
             
-            # Wait for chat list to be visible
-            await self.page.wait_for_selector('[aria-label="对话列表"], [aria-label="Chat list"]', timeout=5000)
-            
             unread_items = await self.page.query_selector_all('[aria-label*="未读消息"], [aria-label*="unread message"]')
             
             if not unread_items:
@@ -1366,131 +1403,12 @@ class WhatsAppBrowserClient:
                     logger.warning(f"Error extracting chat info from item: {e}")
                     continue
             
-            logger.info(f"Found {len(unread_messages)} unread conversations (excluding muted)")
             return unread_messages
             
         except Exception as e:
             logger.error(f"Error getting unread contact messages: {e}")
             return []
 
-    async def handle_customer_message(self, message_data: MessageItem) -> Dict[str, Any]:
-        """
-        Handle a customer message using the customer service agent.
-        
-        Args:
-            message_data: Dictionary containing message information
-            
-        Returns:
-            Dictionary with response information:
-            {
-                "success": bool,
-                "ai_reply_message": str or List[str],  # Can be a single message or list of messages
-                "error": Optional[str]
-            }
-        """
-        try:
-            # Get chat history for the contact
-            chat_messages = await self.get_contact_chat_list(message_data.sender)
-            
-            # Filter messages from the last 3 days
-            current_time = datetime.now(timezone(timedelta(hours=8)))
-            three_days_ago = current_time - timedelta(days=3)
-            
-            # Convert chat messages datetime strings to datetime objects and filter by date
-            filtered_messages = []
-            for msg in chat_messages:
-                try:
-                    # Parse the datetime string to a datetime object
-                    msg_datetime = datetime.strptime(msg.datetime, '%Y-%m-%d %H:%M:%S')
-                    msg_datetime = msg_datetime.replace(tzinfo=timezone(timedelta(hours=8)))
-                    if msg_datetime >= three_days_ago:
-                        filtered_messages.append(msg)
-                except ValueError:
-                    # If datetime parsing fails, include the message anyway
-                    filtered_messages.append(msg)
-            
-            # Get messages until we find the 4th sent message from the end
-            sent_count = 0
-            conversation_messages = []
-            
-            # Iterate through messages in reverse order
-            for msg in reversed(filtered_messages):
-                conversation_messages.insert(0, msg)  # Add message to the beginning to maintain order
-                if msg.type == 'sent':
-                    sent_count += 1
-                    if sent_count >= 4:  # Stop when we find the 4th sent message
-                        conversation_messages = conversation_messages[:-1]
-                        break
-            
-            # Use these filtered messages for the conversation
-            filtered_messages = conversation_messages
-            
-            # Convert chat history to messages
-            messages = []
-            
-            # Add system message with chat context
-            context = f"""This is a conversation with {message_data.sender}.
-            Previous messages are shown below with their timestamps.
-            The current time is {current_time.strftime('%Y-%m-%d %H:%M:%S')}."""
-            messages.append(SystemMessage(content=context))
-            
-            # Add chat history messages
-            for msg in filtered_messages:
-                content = f"[{msg.datetime}] {msg.content}"
-                if msg.type == 'received':
-                    messages.append(HumanMessage(content=content))
-                else:
-                    messages.append(AIMessage(content=content))
-            
-            # Add the current message if it's not in chat history
-            current_msg = f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] {message_data.content}"
-            messages.append(HumanMessage(content=current_msg))
-            
-            # Initialize agent state
-            agent_state = {
-                "messages": messages
-            }
-            
-            logger.debug(f"Agent state: {agent_state}")
-            
-            # Run the agent
-            result = await self.customer_service_agent.ainvoke(
-                agent_state,
-                config={
-                    "configurable": {
-                        "thread_id": str(message_data.sender),
-                        "checkpoint_ns": "whatsapp",
-                        "checkpoint_id": str(message_data.sender)
-                    }
-                }
-            )
-            logger.debug(f"Agent result: {result}")
-            
-            # Extract and split the response
-            if result and result.get("messages"):
-                last_message = result["messages"][-1]
-                # Split messages by the \n\n delimiter and clean up any escaped quotes
-                messages_to_send = [msg.strip().strip('"') for msg in last_message.content.split("\n\n") if msg.strip()]
-                logger.info(f"Messages to send: {messages_to_send}")
-                return {
-                    "success": True,
-                    "ai_reply_message": messages_to_send,
-                    "error": None
-                }
-            else:
-                return {
-                    "success": False,
-                    "ai_reply_message": [],
-                    "error": "No response generated"
-                }
-                
-        except Exception as e:
-            logger.error(f"Error handling customer message: {e}", exc_info=True)
-            return {
-                "success": False,
-                "ai_reply_message": [],
-                "error": str(e)
-            }
 
 class WhatsAppMonitor:
     """WhatsApp Web monitoring class that supports timed execution of multiple tasks"""
@@ -1533,33 +1451,26 @@ class WhatsAppMonitor:
         """Add monitoring task"""
         task = MonitorTask(task_type, task_func, name, enabled, **kwargs)
         self.tasks[name] = task
-        logger.info(f"Added task: {name} ({task_type.value})")
         
     def enable_task(self, task_name: str):
         """Enable task"""
         if task_name in self.tasks:
             self.tasks[task_name].enabled = True
-            logger.info(f"Enabled task: {task_name}")
             
     def disable_task(self, task_name: str):
         """Disable task"""
         if task_name in self.tasks:
             self.tasks[task_name].enabled = False
-            logger.info(f"Disabled task: {task_name}")
             
     def remove_task(self, task_name: str):
         """Remove task"""
         if task_name in self.tasks:
             del self.tasks[task_name]
-            logger.info(f"Removed task: {task_name}")
             
     async def _execute_tasks(self) -> Dict[str, Any]:
         """执行所有启用的任务"""
         results = {}
         execution_start = datetime.now()
-        
-        logger.info("Starting task execution cycle")
-        logger.info(f"Active tasks: {[name for name, task in self.tasks.items() if task.enabled]}")
         
         async with self._task_lock:
             for task_name, task in self.tasks.items():
@@ -1569,7 +1480,6 @@ class WhatsAppMonitor:
                     
                 try:
                     self.current_task = task_name
-                    logger.info(f"Executing task: {task_name}")
                     
                     task_start = datetime.now()
                     
@@ -1591,8 +1501,6 @@ class WhatsAppMonitor:
                         'duration': task_duration
                     }
                     
-                    logger.info(f"Task {task_name} completed in {task_duration:.2f}s")
-                    
                 except Exception as e:
                     task.error_count += 1
                     results[task_name] = {
@@ -1613,7 +1521,6 @@ class WhatsAppMonitor:
             'execution_time': execution_start.isoformat()
         }
         
-        logger.info(f"Task execution cycle completed in {total_duration:.2f}s")
         return results
     
     async def start_monitoring(self):
@@ -1625,7 +1532,6 @@ class WhatsAppMonitor:
         self.is_running = True
         # 显示任务列表
         enabled_tasks = [name for name, task in self.tasks.items() if task.enabled]
-        logger.info(f"Enabled tasks: {', '.join(enabled_tasks)}")
         try:
             while self.is_running:
                 cycle_start = datetime.now()
@@ -1667,3 +1573,8 @@ class WhatsAppMonitor:
                 for name, task in self.tasks.items()
             }
         }
+
+
+
+
+global_whatsapp_client = WhatsAppBrowserClient()
