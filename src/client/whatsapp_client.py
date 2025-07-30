@@ -42,14 +42,15 @@ if not logger.handlers:
 class TaskType(Enum):
     """Task type enumeration"""
     SCREENSHOT = "screenshot"
-    MESSAGE_CHECK = "message_check"
+    AUTO_REPLY = "auto_reply"
     CUSTOM = "custom"
 
 def can_auto_replay_contact_message(contact_name: str) -> bool:
     """
     判断是否可以自动回复联系人的消息
     """
-    return contact_name in ['ben-service@agentsben.com']
+    return True
+    # return contact_name in ['ben-service@agentsben.com']
 
 class MonitorTask:
     """Monitor task definition"""
@@ -349,7 +350,7 @@ class WhatsAppBrowserClient:
             return self.monitor.get_status()
         return {'is_running': False, 'monitor_exists': False}
         
-    async def check_unread_messages(self) -> List[MessageItem]:
+    async def auto_reply_message(self) -> List[MessageItem]:
         """Check new messages"""
         if not self.page:
             raise RuntimeError("Browser not started. Call start() first.")
@@ -540,7 +541,7 @@ class WhatsAppBrowserClient:
         try:
             # Wait for chat messages to load
             await self.page.wait_for_selector('#main', timeout=1000)
-            await self._save_conversation_html_to_log(self.page)
+            # await self._save_conversation_html_to_log(self.page)
             
             messages: List[MessageItem] = []
             
@@ -1495,9 +1496,9 @@ class WhatsAppMonitor:
         
         # Message check task
         self.add_task(
-            TaskType.MESSAGE_CHECK,
-            self.whatsapp_client.check_unread_messages,
-            "message_check_task"
+            TaskType.AUTO_REPLY,
+            self.whatsapp_client.auto_reply_message,
+            "auto_reply_message"
         )
     
     def add_task(

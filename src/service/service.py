@@ -632,4 +632,88 @@ async def get_product_info(request: GetProductInfoInput):
     logging.info(f"Get product info endpoint: {request}")
     return await api_taobao.get_product_info(request.product_id, request.platform)
 
+class TaskControlInput(BaseModel):
+    """Task control input model."""
+    task_name: str = Field(default="auto_reply_message", description="任务名称")
+    action: str = Field(default="enable", description="操作类型: enable(启用) 或 disable(禁用)")
+
+
+class TaskControlResponse(BaseModel):
+    """Task control response model."""
+    success: bool
+    message: str
+    task_name: str
+    enabled: bool
+    status: Dict[str, Any]
+
+
+@app.post("/whatsapp/control_task", response_model=TaskControlResponse)
+async def control_whatsapp_task(request: TaskControlInput):
+    """控制 WhatsApp 任务启用/禁用
+    
+    Example curl:
+    ```bash
+    # 启用任务
+    curl -X POST http://0.0.0.0:18080/whatsapp/control_task \
+        -H "Content-Type: application/json" \
+        -d '{"task_name": "auto_reply_message", "action": "enable"}'
+    
+    # 禁用任务
+    curl -X POST http://0.0.0.0:18080/whatsapp/control_task \
+        -H "Content-Type: application/json" \
+        -d '{"task_name": "auto_reply_message", "action": "disable"}'
+    ```
+    """
+    try:
+        from client.whatsapp_client import global_whatsapp_client
+        
+        # 验证操作类型
+        if request.action not in ["enable", "disable"]:
+            raise HTTPException(
+                status_code=400,
+                detail="action 参数必须是 'enable' 或 'disable'"
+            )
+        
+        # 获取监控器
+        monitor = global_whatsapp_client.monitor
+        if not monitor:
+            raise HTTPException(
+                status_code=400, 
+                detail="WhatsApp 监控器未启动，请先启动 WhatsApp 服务"
+            )
+        
+        # 检查任务是否存在
+        
+        if request.task_name not in monitor.tasks:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"任务 '{request.task_name}' 不存在"
+            )
+        
+        # 执行操作
+        if request.action == "enable":
+            monitor.enable_task(request.task_name)
+            action_message = "启用"
+        else:
+            monitor.disable_task(request.task_name)
+            action_message = "禁用"
+        
+        # 获取任务状态
+        task = monitor.tasks[request.task_name]
+        
+        return TaskControlResponse(
+            success=True,
+            message=f"任务 '{request.task_name}' 已{action_message}",
+            task_name=request.task_name,
+            enabled=task.enabled,
+            status=monitor.get_status()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"控制任务失败: {e}")
+        raise HTTPException(status_code=500, detail=f"控制任务失败: {str(e)}")
+
+
 app.include_router(router)
