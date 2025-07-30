@@ -539,7 +539,8 @@ class WhatsAppBrowserClient:
         
         try:
             # Wait for chat messages to load
-            await self.page.wait_for_selector('#main', timeout=3000)
+            await self.page.wait_for_selector('#main', timeout=1000)
+            await self._save_conversation_html_to_log(self.page)
             
             messages: List[MessageItem] = []
             
@@ -1158,7 +1159,7 @@ class WhatsAppBrowserClient:
         
         try:
             # Wait for the chat to be loaded and input field to be available
-            await self.page.wait_for_selector('#main', timeout=5000)
+            await self.page.wait_for_selector('#main', timeout=2000)
             
             # Find the message input field using multiple possible selectors
             input_selectors = [
@@ -1170,7 +1171,7 @@ class WhatsAppBrowserClient:
             input_element = None
             for selector in input_selectors:
                 try:
-                    input_element = await self.page.wait_for_selector(selector, timeout=2000)
+                    input_element = await self.page.wait_for_selector(selector, timeout=1000)
                     if input_element:
                         logger.debug(f"Found input element with selector: {selector}")
                         break
@@ -1244,7 +1245,7 @@ class WhatsAppBrowserClient:
             target_element = None
             if isinstance(element_or_selector, str):
                 # 如果是选择器字符串，查找元素
-                target_element = await self.page.wait_for_selector(element_or_selector, timeout=5000)
+                target_element = await self.page.wait_for_selector(element_or_selector, timeout=2000)
                 if not target_element:
                     logger.error(f"Element not found with selector: {element_or_selector}")
                     return False
@@ -1254,14 +1255,14 @@ class WhatsAppBrowserClient:
             
             # 点击元素获得焦点
             await target_element.click()
-            await self.page.wait_for_timeout(random.randint(200, 500))
+            await self.page.wait_for_timeout(random.randint(100, 200))
 
             # 清空现有内容
             if clear_first:
                 await self.page.keyboard.press('Control+a')
-                await self.page.wait_for_timeout(random.randint(50, 150))
+                await self.page.wait_for_timeout(random.randint(50, 100))
                 await self.page.keyboard.press('Backspace')
-                await self.page.wait_for_timeout(random.randint(100, 200))
+                await self.page.wait_for_timeout(random.randint(50, 100))
             
             if text.strip() == '':
                 return True
@@ -1278,7 +1279,7 @@ class WhatsAppBrowserClient:
                     
                     # 5% 概率模拟思考停顿
                     if random.random() < 0.05:
-                        thinking_pause = random.randint(300, 800)
+                        thinking_pause = random.randint(100, 300)
                         await self.page.wait_for_timeout(thinking_pause)
             
             # 模拟可能的人类行为：30% 概率进行退格重打最后一个字符
@@ -1332,62 +1333,121 @@ class WhatsAppBrowserClient:
             # 更新当前对话信息缓存
             self._current_chat_info = current_chat_info
             
-            unread_items = await self.page.query_selector_all('[aria-label*="未读消息"], [aria-label*="unread message"]')
+            # 使用更简单的选择器查找未读消息指示器
+            unread_selectors = [
+                '[aria-label*="未读消息"]',
+                '[aria-label*="unread message"]',
+                '[data-testid="unread-message"]'
+            ]
+            
+            unread_items = []
+            for selector in unread_selectors:
+                try:
+                    items = await self.page.query_selector_all(selector)
+                    unread_items.extend(items)
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
+                    continue
             
             if not unread_items:
                 return unread_messages
             
             for unread_indicator in unread_items:
                 try:
-                    # Check if this conversation is muted
-                    muted_indicator = await unread_indicator.query_selector('[aria-label="已静音的对话"], [aria-label*="muted"]')
+                    # 检查是否为静音对话
+                    try:
+                        muted_indicator = await unread_indicator.query_selector(
+                            '[aria-label="已静音的对话"], [aria-label*="muted"]'
+                        )
+                        
+                        if muted_indicator:
+                            logger.debug("Skipping muted conversation")
+                            continue
+                    except Exception as e:
+                        logger.debug(f"Error checking muted status: {e}")
                     
-                    if muted_indicator:
-                        logger.debug("Skipping muted conversation")
-                        continue  # Skip muted conversations
+                    # 提取未读消息数量
+                    try:
+                        aria_label = await unread_indicator.get_attribute('aria-label')
+                        unread_count = "1"  # Default to 1 if can't parse
+                        if aria_label:
+                            count_match = re.search(r'(\d+)', aria_label)
+                            if count_match:
+                                unread_count = count_match.group(1)
+                    except Exception as e:
+                        logger.debug(f"Error extracting aria-label: {e}")
+                        unread_count = "1"
                     
-                    # Extract unread count from aria-label
-                    aria_label = await unread_indicator.get_attribute('aria-label')
-                    unread_count = "1"  # Default to 1 if can't parse
-                    if aria_label:
-                        count_match = re.search(r'(\d+)', aria_label)
-                        if count_match:
-                            unread_count = count_match.group(1)
-                    
-                    # Find the parent listitem that contains this unread indicator
-                    chat_item = await unread_indicator.evaluate_handle('''
-                        (element) => {
-                            let current = element;
-                            while (current && current.parentElement) {
-                                current = current.parentElement;
-                                if (current.getAttribute('role') === 'listitem') {
-                                    return current;
-                                }
-                            }
-                            return null;
-                        }
-                    ''')
-                    
-                    if not chat_item:
-                        logger.warning("Could not find parent listitem for unread indicator")
+                    # 使用Playwright的内置方法查找父级聊天项
+                    try:
+                        # 尝试多种方式查找父级聊天项
+                        chat_item_element = None
+                        
+                        # 方法1: 使用closest选择器
+                        try:
+                            chat_item_element = await unread_indicator.query_selector(
+                                'xpath=ancestor::div[@role="listitem"][1]'
+                            )
+                        except Exception:
+                            pass
+                        
+                        # 方法2: 使用data-testid选择器
+                        if not chat_item_element:
+                            try:
+                                chat_item_element = await unread_indicator.query_selector(
+                                    'xpath=ancestor::div[@data-testid="cell" or @data-testid="chat-list-item"][1]'
+                                )
+                            except Exception:
+                                pass
+                        
+                        # 方法3: 使用常见的WhatsApp类名
+                        if not chat_item_element:
+                            try:
+                                chat_item_element = await unread_indicator.query_selector(
+                                    'xpath=ancestor::div[contains(@class, "_8nE1Y")][1]'
+                                )
+                            except Exception:
+                                pass
+                        
+                        if not chat_item_element:
+                            logger.debug("Could not find parent chat item for unread indicator")
+                            continue
+                            
+                        # 验证元素是否仍然有效
+                        try:
+                            await chat_item_element.get_attribute('role')
+                        except Exception:
+                            logger.debug("Element is no longer valid, skipping")
+                            continue
+                            
+                    except Exception as e:
+                        logger.debug(f"Error finding parent chat item: {e}")
                         continue
                     
-                    # Get contact name from title attribute or text content
+                    # 获取联系人名称
                     contact_name = "Unknown"
                     
-                    name_elements = await chat_item.query_selector_all('span[dir="auto"]')
-                    for name_elem in name_elements:
-                        text = await name_elem.text_content()
-                        if text and text.strip() and not re.match(r'^\d{1,2}:\d{2}$', text.strip()):
-                            contact_name = text.strip()
-                            break
-                    
-                    # Look for message preview in the message area
-                    message_preview_container = await chat_item.text_content()
+                    try:
+                        # 使用更精确的选择器查找联系人名称
+                        name_elements = await chat_item_element.query_selector_all(
+                            'span[dir="auto"], [data-testid="conversation-title"]'
+                        )
+                        
+                        for name_elem in name_elements:
+                            text = await name_elem.text_content()
+                            if text and text.strip() and not re.match(r'^\d{1,2}:\d{2}$', text.strip()):
+                                contact_name = text.strip()
+                                break
+                        
+                        # 获取消息预览
+                        message_preview_container = await chat_item_element.text_content()
+                    except Exception as e:
+                        logger.warning(f"Error extracting text content: {e}")
+                        message_preview_container = "Message content unavailable"
                     
                     current_time = datetime.now(timezone(timedelta(hours=8)))
                     
-                    # Create unread message entry using MessageItem model
+                    # 创建未读消息条目
                     unread_entry = MessageItem(
                         type="received",
                         sender=contact_name,
@@ -1400,7 +1460,7 @@ class WhatsAppBrowserClient:
                     logger.info(f"Found unread message from {contact_name}: {unread_count} messages")
                     
                 except Exception as e:
-                    logger.warning(f"Error extracting chat info from item: {e}")
+                    logger.warning(f"Error extracting chat info from item: {e}", exc_info=True)
                     continue
             
             return unread_messages

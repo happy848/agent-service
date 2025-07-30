@@ -12,7 +12,7 @@ from client.models import MessageItem
 logger = logging.getLogger(__name__)
 
 # API配置
-generate_chat_response_url = "https://agentsben.com/agent/chatbot-web/chat"
+generate_chat_response_url = "https://agentsben.com/api/agent/chatbot-web/chat"
 
 
 class ChatResponse(BaseModel):
@@ -32,7 +32,6 @@ async def handle_customer_message(messages: List[MessageItem]) -> Dict[str, Any]
         {
             "success": bool,
             "ai_reply_message": str,
-            "thread_id": str,
             "error": Optional[str]
         }
     """
@@ -44,9 +43,18 @@ async def handle_customer_message(messages: List[MessageItem]) -> Dict[str, Any]
         
         # 设置请求头
         headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "AgentService/1.0"
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Connection": "keep-alive",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "X-Requested-With": "XMLHttpRequest"
         }
         
         # 发送请求
@@ -65,7 +73,6 @@ async def handle_customer_message(messages: List[MessageItem]) -> Dict[str, Any]
                     return {
                         "success": False,
                         "ai_reply_message": "",
-                        "thread_id": thread_id,
                         "error": f"API请求失败: {response.status}"
                     }
                 
@@ -81,7 +88,6 @@ async def handle_customer_message(messages: List[MessageItem]) -> Dict[str, Any]
                     return {
                         "success": False,
                         "ai_reply_message": "",
-                        "thread_id": thread_id,
                         "error": f"响应格式错误: {e}"
                     }
                 
@@ -91,7 +97,6 @@ async def handle_customer_message(messages: List[MessageItem]) -> Dict[str, Any]
                     return {
                         "success": False,
                         "ai_reply_message": "",
-                        "thread_id": thread_id,
                         "error": chat_response.message
                     }
                 
