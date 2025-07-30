@@ -369,7 +369,7 @@ class WhatsAppBrowserClient:
                 reply = await handle_customer_message(recently_messages_dict)
                 if reply['success']:
                     messages_to_send = reply['ai_reply_message']
-                    messages_to_send = [x.strip() for x in messages_to_send.split('\n') if x.strip()]
+                    messages_to_send = [x.strip() for x in messages_to_send.split('\n\n') if x.strip()]
                     
                     logger.info('----------------2----------------')
                     logger.info(f"Messages to send: {messages_to_send}")
@@ -377,9 +377,7 @@ class WhatsAppBrowserClient:
                         logger.error(f"No messages to send for contact: {contact_message.sender}")
                         continue
                     for message in messages_to_send:
-                        await self.send_message_to_contact(contact_message.sender, message)
-                        # Add a small delay between messages
-                        await self.page.wait_for_timeout(random.randint(100, 500))
+                        await self.send_message_to_contact(contact_message.sender, message.replace('\n', ' '))
                 else:
                     logger.error(f"Failed to generate reply: {reply['error']}")
         
