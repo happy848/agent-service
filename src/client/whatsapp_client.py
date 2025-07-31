@@ -125,6 +125,9 @@ class WhatsAppBrowserClient:
         # 添加当前对话联系人的最新消息缓存
         self._current_chat_info: Optional[MessageItem] = None
         
+        # 添加异步锁，确保auto_reply_message函数同一时间只能有一个实例执行
+        self._auto_reply_lock = asyncio.Lock()
+        
     async def __aenter__(self):
         """Async context manager entry."""
         await self.start()
@@ -351,37 +354,38 @@ class WhatsAppBrowserClient:
         return {'is_running': False, 'monitor_exists': False}
         
     async def auto_reply_message(self) -> List[MessageItem]:
-        """Check new messages"""
-        if not self.page:
-            raise RuntimeError("Browser not started. Call start() first.")
-        
-        unread_contact_messages = await self.get_unread_messages()
-        
-        for contact_message in unread_contact_messages:
-            if can_auto_replay_contact_message(contact_message.sender):
-                # Use the new customer service agent to handle messages
-                recently_messages = await self.get_contact_chat_list(contact_message.sender)
-                recently_messages_dict = [message.model_dump() for message in recently_messages]
-        
-                latest_message = recently_messages_dict[-1]
-                logger.info('----------------1----------------')
-                logger.info(f"Handling Latest message: {latest_message}")
-                reply = await handle_customer_message(recently_messages_dict)
-                if reply['success']:
-                    messages_to_send = reply['ai_reply_message']
-                    messages_to_send = [x.strip() for x in messages_to_send.split('\n\n') if x.strip()]
-                    
-                    logger.info('----------------2----------------')
-                    logger.info(f"Messages to send: {messages_to_send}")
-                    if len(messages_to_send) == 0:
-                        logger.error(f"No messages to send for contact: {contact_message.sender}")
-                        continue
-                    for message in messages_to_send:
-                        await self.send_message_to_contact(contact_message.sender, message.replace('\n', ' '))
-                else:
-                    logger.error(f"Failed to generate reply: {reply['error']}")
-        
-        return unread_contact_messages
+        """Check new messages with lock protection"""
+        async with self._auto_reply_lock:
+            if not self.page:
+                raise RuntimeError("Browser not started. Call start() first.")
+            
+            unread_contact_messages = await self.get_unread_messages()
+            
+            for contact_message in unread_contact_messages:
+                if can_auto_replay_contact_message(contact_message.sender):
+                    # Use the new customer service agent to handle messages
+                    recently_messages = await self.get_contact_chat_list(contact_message.sender)
+                    recently_messages_dict = [message.model_dump() for message in recently_messages]
+            
+                    latest_message = recently_messages_dict[-1]
+                    logger.info('----------------1----------------')
+                    logger.info(f"Handling Latest message: {latest_message}")
+                    reply = await handle_customer_message(recently_messages_dict)
+                    if reply['success']:
+                        messages_to_send = reply['ai_reply_message']
+                        messages_to_send = [x.strip() for x in messages_to_send.split('\n\n') if x.strip()]
+                        
+                        logger.info('----------------2----------------')
+                        logger.info(f"Messages to send: {messages_to_send}")
+                        if len(messages_to_send) == 0:
+                            logger.error(f"No messages to send for contact: {contact_message.sender}")
+                            continue
+                        for message in messages_to_send:
+                            await self.send_message_to_contact(contact_message.sender, message.replace('\n', ' '))
+                    else:
+                        logger.error(f"Failed to generate reply: {reply['error']}")
+            
+            return unread_contact_messages
             
     async def take_screenshot(self, filename_prefix: str = "") -> str:
         """Take a screenshot and save it with timestamp."""
