@@ -3,10 +3,13 @@ import logging
 import warnings
 import asyncio
 import time
+import base64
+import os
 from asyncio import CancelledError
 from builtins import GeneratorExit
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any, Dict, Optional, List
 from uuid import UUID, uuid4
 from datetime import datetime
@@ -647,6 +650,15 @@ class TaskControlResponse(BaseModel):
     status: Dict[str, Any]
 
 
+class ScreenshotResponse(BaseModel):
+    """Screenshot response model."""
+    success: bool
+    message: str
+    image_base64: str
+    filename: str
+    timestamp: str
+
+
 @app.post("/whatsapp/control_task", response_model=TaskControlResponse)
 async def control_whatsapp_task(request: TaskControlInput):
     """控制 WhatsApp 任务启用/禁用
@@ -714,6 +726,58 @@ async def control_whatsapp_task(request: TaskControlInput):
     except Exception as e:
         logging.error(f"控制任务失败: {e}")
         raise HTTPException(status_code=500, detail=f"控制任务失败: {str(e)}")
+
+
+@app.post("/whatsapp/take_screenshot", response_model=ScreenshotResponse)
+async def take_new_screenshot():
+    """拍摄新的WhatsApp截图，返回base64格式的图片
+    
+    Example curl:
+    ```bash
+    curl -X POST http://0.0.0.0:18080/whatsapp/take_screenshot
+    ```
+    """
+    try:
+        from client.whatsapp_client import global_whatsapp_client
+        
+        # 检查WhatsApp客户端是否启动
+        if not global_whatsapp_client or not global_whatsapp_client.page:
+            raise HTTPException(
+                status_code=400,
+                detail="WhatsApp 客户端未启动，请先启动 WhatsApp 服务"
+            )
+        
+        # 拍摄新截图
+        screenshot_path = await global_whatsapp_client.take_screenshot("api_request")
+        filename = os.path.basename(screenshot_path)
+        
+        # 读取图片文件并转换为base64
+        try:
+            with open(screenshot_path, "rb") as image_file:
+                image_data = image_file.read()
+                image_base64 = base64.b64encode(image_data).decode('utf-8')
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"读取截图文件失败: {str(e)}"
+            )
+        
+        # 获取文件时间戳
+        file_path = Path(screenshot_path)
+        timestamp = datetime.fromtimestamp(file_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        
+        return ScreenshotResponse(
+            success=True,
+            image_base64=image_base64,
+            filename=filename,
+            timestamp=timestamp
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"拍摄截图失败: {e}")
+        raise HTTPException(status_code=500, detail=f"拍摄截图失败: {str(e)}")
 
 
 app.include_router(router)
