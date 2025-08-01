@@ -39,6 +39,9 @@ if not logger.handlers:
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
+# 全局锁，用于确保auto_reply_message函数同一时间只能有一个实例执行
+_global_auto_reply_lock = asyncio.Lock()
+
 class TaskType(Enum):
     """Task type enumeration"""
     SCREENSHOT = "screenshot"
@@ -49,6 +52,8 @@ def can_auto_replay_contact_message(contact_name: str) -> bool:
     """
     判断是否可以自动回复联系人的消息
     """
+    if contact_name == 'WhatsApp':
+        return False
     return True
     # return contact_name in ['ben-service@agentsben.com']
 
@@ -124,9 +129,6 @@ class WhatsAppBrowserClient:
         
         # 添加当前对话联系人的最新消息缓存
         self._current_chat_info: Optional[MessageItem] = None
-        
-        # 添加异步锁，确保auto_reply_message函数同一时间只能有一个实例执行
-        self._auto_reply_lock = asyncio.Lock()
         
     async def __aenter__(self):
         """Async context manager entry."""
@@ -296,7 +298,6 @@ class WhatsAppBrowserClient:
                     
         except Exception as e:
             logger.debug(f"Error handling cookie consent: {e}")
-    
  
     async def close(self):
         """Close the browser and cleanup."""
@@ -355,7 +356,7 @@ class WhatsAppBrowserClient:
         
     async def auto_reply_message(self) -> List[MessageItem]:
         """Check new messages with lock protection"""
-        async with self._auto_reply_lock:
+        async with _global_auto_reply_lock:
             if not self.page:
                 raise RuntimeError("Browser not started. Call start() first.")
             
@@ -385,6 +386,8 @@ class WhatsAppBrowserClient:
                     else:
                         logger.error(f"Failed to generate reply: {reply['error']}")
             
+            
+            
             return unread_contact_messages
             
     async def take_screenshot(self, filename_prefix: str = "") -> str:
@@ -413,7 +416,6 @@ class WhatsAppBrowserClient:
         
         return str(filepath)
     
-  
     async def get_target_contact_chat_active(self, target_contact: str) -> Dict[str, Any]:
         """
         Activate (switch to) the chat for a specific contact.
@@ -516,7 +518,6 @@ class WhatsAppBrowserClient:
             
         return result
         
-    @screenshot_state_recorder
     async def get_contact_chat_list(self, contact_name: str) -> List[Dict[str, Any]]:
         """
         Get chat list for a specific contact.
@@ -661,7 +662,6 @@ class WhatsAppBrowserClient:
             logger.warning(f"Error parsing message element: {e}")
             return None
 
-    @screenshot_state_recorder
     async def send_message_to_contact(self, contact_name: str, message: str) -> Dict[str, Any]:
         """
         Send a message to a specific contact.
@@ -949,7 +949,6 @@ class WhatsAppBrowserClient:
             logger.error(f"Error finding contact in chat list: {e}")
             
             return None
-
 
     async def _click_chat_contact(self, contact_info: Dict[str, Any]) -> bool:
         """
@@ -1320,7 +1319,6 @@ class WhatsAppBrowserClient:
         unread_messages: List[MessageItem] = []
         
         try:
-            await self.goto_whatsapp_web()
             
             # 获取当前对话的最新消息信息
             current_chat_info = await self._get_current_chat_last_message()
@@ -1346,6 +1344,8 @@ class WhatsAppBrowserClient:
             unread_items = []
             for selector in unread_selectors:
                 try:
+                    await self.click_chat_list_tab("all")
+                    await self.click_chat_list_tab("unread")
                     items = await self.page.query_selector_all(selector)
                     unread_items.extend(items)
                 except Exception as e:
@@ -1466,11 +1466,119 @@ class WhatsAppBrowserClient:
                     logger.warning(f"Error extracting chat info from item: {e}", exc_info=True)
                     continue
             
-            return unread_messages
+            # 对 unread_messages 进行去重，基于 sender 和 content
+            unique_messages = []
+            seen_combinations = set()
             
+            for message in unread_messages:
+                # 创建唯一标识符：sender + content
+                unique_key = f"{message.sender}:{message.content}"
+                if unique_key not in seen_combinations:
+                    seen_combinations.add(unique_key)
+                    unique_messages.append(message)
+            
+            await self.random_reload_page()
+            return unique_messages
         except Exception as e:
             logger.error(f"Error getting unread contact messages: {e}")
             return []
+
+    async def random_reload_page(self):
+        """Randomly reload the page"""
+        # 1/100 概率刷新页面
+        import random
+        if random.randint(1, 100) == 1:
+            logger.info("Random page refresh triggered (1/100 probability)")
+            await self.page.reload()
+            await asyncio.sleep(5)  # 等待页面加载
+            await self._handle_whatsapp_ui_changes()
+    
+    async def click_chat_list_tab(self, tab_name: str) -> Dict[str, Any]:
+        """
+        点击聊天列表的tab按钮（所有、未读、特别关注、群组）
+        
+        Args:
+            tab_name: Tab名称，支持的值: "all", "unread", "favorites", "groups"
+                     对应的中文: "所有", "未读", "特别关注", "群组"
+        
+        Returns:
+            Dictionary with click result:
+            {
+                "success": bool,
+                "tab_name": str,
+                "error": str
+            }
+        """
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+        
+        # Tab名称映射
+        tab_mapping = {
+            "all": "所有",
+            "unread": "未读", 
+            "favorites": "特别关注",
+            "groups": "群组"
+        }
+        
+        result = {
+            "success": False,
+            "tab_name": tab_name,
+            "error": None
+        }
+        
+        try:
+            # 获取对应的中文名称
+            chinese_name = tab_mapping.get(tab_name.lower(), tab_name)
+            
+            # 构建tab选择器
+            tab_selectors = [
+                f'button[role="tab"][aria-label*="{chinese_name}"]',
+                f'button[role="tab"] div:has-text("{chinese_name}")',
+                f'button[id="{tab_name}-filter"]',
+                f'button[aria-controls="chat-list"] div:has-text("{chinese_name}")'
+            ]
+            
+            tab_element = None
+            for selector in tab_selectors:
+                try:
+                    tab_element = await self.page.wait_for_selector(selector, timeout=2000)
+                    if tab_element:
+                        logger.debug(f"Found tab element with selector: {selector}")
+                        break
+                except:
+                    continue
+            
+            if not tab_element:
+                result["error"] = f"Tab '{chinese_name}' not found"
+                logger.error(f"Could not find tab: {chinese_name}")
+                return result
+            
+            # 检查tab是否已经是激活状态
+            is_active = await tab_element.get_attribute("aria-pressed")
+            if is_active == "true":
+                logger.info(f"Tab '{chinese_name}' is already active")
+                result["success"] = True
+                return result
+            
+            # 模拟人类点击行为
+            await tab_element.click()
+            await self.page.wait_for_timeout(random.randint(100, 300))
+            
+            # 验证点击是否成功
+            is_active_after = await tab_element.get_attribute("aria-pressed")
+            if is_active_after == "true":
+                result["success"] = True
+                logger.info(f"Successfully clicked tab: {chinese_name}")
+            else:
+                result["error"] = f"Failed to activate tab: {chinese_name}"
+                logger.error(f"Tab click failed for: {chinese_name}")
+            
+        except Exception as e:
+            error_msg = f"Error clicking tab '{tab_name}': {e}"
+            result["error"] = error_msg
+            logger.error(error_msg)
+        
+        return result
 
 
 class WhatsAppMonitor:
