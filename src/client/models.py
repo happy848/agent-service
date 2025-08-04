@@ -2,7 +2,7 @@
 Shared models for WhatsApp client functionality.
 """
 
-from typing import Literal
+from typing import Literal, List
 from pydantic import BaseModel, Field
 
 
@@ -13,3 +13,4 @@ class MessageItem(BaseModel):
     content: str = Field(description="Content of the message.")
     datetime: str = Field(description="Datetime of the message.")
     timestamp: str = Field(description="Timestamp of the message.") 
+    images: List[str] = Field(description="Images of the message.")

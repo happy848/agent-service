@@ -20,12 +20,12 @@ class ChatResponse(BaseModel):
     message: str
     data: Optional[Dict[str, Any]] = None
 
-async def handle_customer_message(messages: List[MessageItem]) -> Dict[str, Any]:
+async def handle_customer_message(messages_dict: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     使用客户服务智能体处理客户消息。
     
     Args:
-        messages: 包含消息信息的MessageItem对象
+        messages: 包含消息信息的MessageItem dict对象
         
     Returns:
         包含响应信息的字典:
@@ -38,7 +38,7 @@ async def handle_customer_message(messages: List[MessageItem]) -> Dict[str, Any]
     try:
         request_data = {
             "sign": "sadfsaSDGF245346HYJm&^*hjkOHMHJLHJmh456kghkTYUTY",
-            "messages": messages,
+            "messages": messages_dict,
         }
         
         # 设置请求头

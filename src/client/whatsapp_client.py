@@ -6,6 +6,7 @@ Browser client for WhatsApp Web screenshot capture using Playwright.
 """
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -41,6 +42,40 @@ if not logger.handlers:
 
 # 全局锁，用于确保auto_reply_message函数同一时间只能有一个实例执行
 _global_auto_reply_lock = asyncio.Lock()
+
+
+global_get_img_base64_code = """
+    (blobUrl) => {
+        return new Promise((resolve, reject) => {
+            fetch(blobUrl)
+                .then(response => {
+                    if (!response.ok) {
+                        resolve(null);
+                        return;
+                    }
+                    return response.blob();
+                })
+                .then(blob => {
+                    if (!blob) {
+                        resolve(null);
+                        return;
+                    }
+                    
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                        resolve(reader.result);
+                    };
+                    reader.onerror = () => {
+                        resolve(null);
+                    };
+                    reader.readAsDataURL(blob);
+                })
+                .catch(error => {
+                    resolve(null);
+                });
+        });
+    };
+    """
 
 class TaskType(Enum):
     """Task type enumeration"""
@@ -362,6 +397,9 @@ class WhatsAppBrowserClient:
             
             unread_contact_messages = await self.get_unread_messages()
             
+            # 保存未读消息日志到本地目录
+            await self._save_unread_messages_log(unread_contact_messages)
+            
             for contact_message in unread_contact_messages:
                 if can_auto_replay_contact_message(contact_message.sender):
                     # Use the new customer service agent to handle messages
@@ -415,6 +453,51 @@ class WhatsAppBrowserClient:
         )
         
         return str(filepath)
+    
+    async def _save_unread_messages_log(self, unread_messages: List[MessageItem]) -> None:
+        """
+        保存未读消息日志到本地目录
+        
+        Args:
+            unread_messages: 未读消息列表
+        """
+        if not unread_messages:
+            logger.info("没有未读消息需要保存")
+            return
+            
+        try:
+            # 确保日志目录存在
+            logs_dir = Path("/app/docker/logs")
+            logs_dir.mkdir(exist_ok=True)
+            
+            # 生成带时间戳的文件名
+            utc_plus_8 = timezone(timedelta(hours=8))
+            current_time = datetime.now(utc_plus_8)
+            timestamp = current_time.strftime('%Y%m%d_%H%M%S')
+            filename = f"unread_messages_{timestamp}.json"
+            filepath = logs_dir / filename
+            
+            # 准备日志数据
+            log_data = {
+                "timestamp": current_time.isoformat(),
+                "total_unread_messages": len(unread_messages),
+                "unread_messages": []
+            }
+            
+            # 转换消息为可序列化的格式
+            for message in unread_messages:
+                message_dict = message.model_dump()
+                log_data["unread_messages"].append(message_dict)
+            
+            # 写入JSON文件
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(log_data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"未读消息日志已保存到: {filepath}")
+            logger.info(f"共保存 {len(unread_messages)} 条未读消息")
+            
+        except Exception as e:
+            logger.error(f"保存未读消息日志失败: {e}")
     
     async def get_target_contact_chat_active(self, target_contact: str) -> Dict[str, Any]:
         """
@@ -608,7 +691,7 @@ class WhatsAppBrowserClient:
             
             # Get message content
             content = ""
-            content_elements = await element.query_selector_all('._ao3e.selectable-text.copyable-text')
+            content_elements = await element.query_selector_all('.selectable-text.copyable-text')
             
             content_parts = []
             for content_element in content_elements:
@@ -619,6 +702,35 @@ class WhatsAppBrowserClient:
                         content_parts.append(text.strip())
             
             content = ' '.join(content_parts).strip()
+            
+            # Extract images from the message - only process blob URLs and base64 data
+            images = []
+            img_elements = await element.query_selector_all('img')
+            for img_elem in img_elements:
+                try:
+                    img_src = await img_elem.get_attribute('src')
+                    if img_src:
+                        # Only handle blob URLs and base64 data
+                        if img_src.startswith('blob:'):
+                            # Convert blob URL to base64
+                            logger.info(f'Processing blob URL: {img_src}')
+                            await self.page.wait_for_timeout(3000)
+                            base64_data = await self._convert_blob_to_base64(img_src)
+                            logger.info(f'Base64 conversion result: {base64_data[:100] if base64_data else "None"}...')
+                            
+                            if base64_data:
+                                images.append(base64_data)
+                        elif img_src.startswith('data:image/'):
+                            # Direct base64 data - add directly
+                            logger.info(f'Found base64 image data: {img_src[:100]}...')
+                            images.append(img_src)
+                        else:
+                            # Skip regular URLs - only process blob URLs and base64 data
+                            logger.debug(f'Skipping regular URL: {img_src}')
+                            continue
+                except Exception as e:
+                    logger.warning(f"Error extracting image: {e}")
+                    continue
             
             # Get datetime
             datetime_str = ""
@@ -646,8 +758,8 @@ class WhatsAppBrowserClient:
                         datetime_str = f"{time_text.strip()}, {current_date}"
                         break
             
-            # Skip if no content found
-            if not content:
+            # Skip if no content and no images found
+            if not content and not images:
                 return None
             
             return MessageItem(
@@ -655,12 +767,55 @@ class WhatsAppBrowserClient:
                 sender=sender,
                 content=content,
                 datetime=datetime_str or current_time.strftime('%Y-%m-%d %H:%M:%S'),
-                timestamp=timestamp
+                timestamp=timestamp,
+                images=images
             )
             
         except Exception as e:
             logger.warning(f"Error parsing message element: {e}")
             return None
+
+    async def _convert_blob_to_base64(self, blob_url: str) -> Optional[str]:
+        """
+        Convert blob URL to base64 encoded image data.
+        Only processes blob URLs, skips regular URLs.
+        
+        Args:
+            blob_url: The blob URL to convert
+            
+        Returns:
+            Base64 encoded image data string or None if conversion fails
+        """
+        try:
+            if not self.page:
+                logger.warning("Browser page not available for blob conversion")
+                return None
+            
+            # Validate that this is actually a blob URL
+            if not blob_url.startswith('blob:'):
+                logger.warning(f"Not a blob URL, skipping: {blob_url}")
+                return None
+            
+            # Execute JavaScript to convert blob URL to base64
+            try:
+                base64_data = await self.page.evaluate(global_get_img_base64_code, blob_url)
+                logger.info(f"JavaScript execution completed for blob URL: {blob_url[:50]}...")
+            except Exception as js_error:
+                logger.error(f"JavaScript execution failed for blob URL: {js_error}")
+                return None
+                
+            if base64_data and base64_data.startswith('data:image/'):
+                logger.info(f"Successfully converted blob URL to base64 image data")
+                return base64_data
+            else:
+                logger.warning(f"Failed to convert blob URL to valid base64 image data: {blob_url[:50]}...")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Error converting blob to base64: {e}")
+            return None
+
+
 
     async def send_message_to_contact(self, contact_name: str, message: str) -> Dict[str, Any]:
         """
@@ -807,7 +962,8 @@ class WhatsAppBrowserClient:
                         sender=message.sender,
                         content=message.content,
                         datetime=message.datetime or current_time.strftime('%Y-%m-%d %H:%M:%S'),
-                        timestamp=message.timestamp or current_time.isoformat()
+                        timestamp=message.timestamp or current_time.isoformat(),
+                        images=message.images
                     )
                     break
             
@@ -1456,7 +1612,8 @@ class WhatsAppBrowserClient:
                         sender=contact_name,
                         content=message_preview_container,
                         datetime=current_time.strftime('%Y-%m-%d %H:%M:%S'),
-                        timestamp=current_time.isoformat()
+                        timestamp=current_time.isoformat(),
+                        images=[]
                     )
                     
                     unread_messages.append(unread_entry)
@@ -1563,15 +1720,7 @@ class WhatsAppBrowserClient:
             # 模拟人类点击行为
             await tab_element.click()
             await self.page.wait_for_timeout(random.randint(100, 300))
-            
-            # 验证点击是否成功
-            is_active_after = await tab_element.get_attribute("aria-pressed")
-            if is_active_after == "true":
-                result["success"] = True
-                logger.info(f"Successfully clicked tab: {chinese_name}")
-            else:
-                result["error"] = f"Failed to activate tab: {chinese_name}"
-                logger.error(f"Tab click failed for: {chinese_name}")
+            result["success"] = True
             
         except Exception as e:
             error_msg = f"Error clicking tab '{tab_name}': {e}"
