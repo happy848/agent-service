@@ -1744,6 +1744,8 @@ class WhatsAppMonitor:
         # Register default tasks
         self._register_default_tasks()
         
+        self.disable_task("auto_reply_message")
+        
     def _register_default_tasks(self):
         """Register default monitoring tasks"""
         # Screenshot task
