@@ -177,8 +177,8 @@ class WhatsAppBrowserClient:
     async def start(self):
         """Start the browser and navigate to WhatsApp Web."""
         # Start browser manager
-        if os.getenv('ENV_MODE') != 'prod':
-            return
+        # if os.getenv('ENV_MODE') != 'prod':
+        #     return
 
         # Start the browser manager first
         await self.browser_manager.start()
@@ -613,6 +613,419 @@ class WhatsAppBrowserClient:
             return []
         
         return await self.get_chat_messages()
+    
+    async def get_contacts_list(self, offset: int = 0, limit: int = 5) -> Dict[str, Any]:
+        """
+        获取联系人列表（分页）
+        
+        Args:
+            offset: 起始位置（从0开始）
+            limit: 获取的联系人数量（1-5之间）
+            
+        Returns:
+            Dictionary containing:
+            {
+                "contacts": List[Dict[str, Any]],  # 联系人信息列表
+                    # 每个联系人包含:
+                    #   - contact_name: str - 联系人名称
+                    #   - phone_number: Optional[str] - 电话号码（如果可获取）
+                    #   - message_preview: str - 最后一条消息预览
+                    #   - unread_count: int - 未读消息数量
+                    #   - is_muted: bool - 是否静音
+                    #   - index: int - 在列表中的索引
+                "total_count": int,  # 总联系人数量（如果可获取）
+                "offset": int,  # 当前偏移量
+                "limit": int,  # 本次获取的数量
+                "has_more": bool  # 是否还有更多联系人
+            }
+        """
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+        
+        # 限制 limit 在 1-5 之间
+        limit = max(1, min(5, limit))
+        offset = max(0, offset)
+        
+        result = {
+            "contacts": [],
+            "total_count": 0,
+            "offset": offset,
+            "limit": limit,
+            "has_more": False
+        }
+        
+        try:
+            # 确保在聊天列表页面
+            try:
+                await self.page.wait_for_selector('#side', timeout=3000)
+            except:
+                logger.warning("WhatsApp sidebar not found, page may not be fully loaded")
+                return result
+            
+            # 等待聊天列表可见
+            chat_list_selectors = [
+                '#pane-side',
+                '[aria-label="聊天列表"]',
+                '[aria-label="对话列表"]',
+                '[aria-label="Chat list"]', 
+            ]
+            
+            chat_list_found = False
+            for selector in chat_list_selectors:
+                try:
+                    await self.page.wait_for_selector(selector, timeout=2000)
+                    chat_list_found = True
+                    break
+                except:
+                    continue
+            
+            if not chat_list_found:
+                logger.error("Could not find chat list with any known selector")
+                return result
+            
+            # 获取聊天列表的滚动容器
+            scroll_container_selectors = [
+                '#pane-side',
+                '[aria-label="聊天列表"]',
+                '[role="grid"]',
+            ]
+            
+            scroll_container = None
+            for selector in scroll_container_selectors:
+                try:
+                    scroll_container = await self.page.wait_for_selector(selector, timeout=1000)
+                    if scroll_container:
+                        logger.debug(f"Found scroll container with selector: {selector}")
+                        break
+                except:
+                    continue
+            
+            # 获取所有聊天列表项（尝试多种选择器以兼容不同版本）
+            chat_list_items = None
+            item_selectors = [
+                '#pane-side [role="listitem"]',  # 旧版本选择器
+                '#pane-side [role="row"]',  # 新版本选择器（根据HTML结构）
+                '[aria-label="聊天列表"] [role="row"]',
+                '[role="grid"] [role="row"]',
+            ]
+            
+            for selector in item_selectors:
+                try:
+                    items = self.page.locator(selector)
+                    count = await items.count()
+                    if count > 0:
+                        chat_list_items = items
+                        logger.debug(f"Using selector: {selector} with {count} items")
+                        break
+                except:
+                    continue
+            
+            if not chat_list_items:
+                logger.error("Could not find chat list items with any known selector")
+                return result
+            
+            total_count = await chat_list_items.count()
+            result["total_count"] = total_count
+            
+            # 计算实际要获取的范围
+            end_index = min(offset + limit, total_count)
+            result["has_more"] = end_index < total_count
+            
+            # 如果需要获取的联系人超出当前可见范围，先滚动到目标位置
+            if offset > 0 or end_index > 0:
+                try:
+                    # 方法1: 使用 scroll_into_view_if_needed 滚动到目标元素（推荐方法）
+                    target_item = chat_list_items.nth(offset)
+                    item_count = await target_item.count()
+                    if item_count > 0:
+                        # 使用 scroll_into_view_if_needed 滚动到起始位置的联系人
+                        await target_item.scroll_into_view_if_needed()
+                        # 等待滚动完成
+                        await self.page.wait_for_timeout(random.randint(300, 500))
+                        logger.info(f"Scrolled to contact at index {offset} using scroll_into_view_if_needed")
+                    
+                    # 如果结束位置的联系人也需要滚动，也滚动到那里以确保都在可见范围内
+                    if end_index > offset + 1:
+                        end_item = chat_list_items.nth(end_index - 1)
+                        end_item_count = await end_item.count()
+                        if end_item_count > 0:
+                            await end_item.scroll_into_view_if_needed()
+                            await self.page.wait_for_timeout(random.randint(200, 400))
+                            logger.info(f"Scrolled to contact at index {end_index - 1} using scroll_into_view_if_needed")
+                    
+                except Exception as e:
+                    logger.warning(f"Error scrolling to target contacts using scroll_into_view_if_needed: {e}")
+                    # 方法2: 如果滚动失败，尝试使用JavaScript滚动（备选方案）
+                    try:
+                        # 根据HTML结构，每个联系人项的高度大约是95px
+                        # 但为了更准确，我们可以尝试获取实际高度
+                        item_height = 95  # 默认高度（从HTML结构看到）
+                        
+                        # 尝试获取第一个联系人的实际高度
+                        try:
+                            first_item = chat_list_items.nth(0)
+                            if await first_item.count() > 0:
+                                bounding_box = await first_item.bounding_box()
+                                if bounding_box and bounding_box.get('height'):
+                                    item_height = int(bounding_box['height'])
+                                    logger.debug(f"Detected item height: {item_height}px")
+                        except:
+                            pass
+                        
+                        # 计算需要滚动到的位置（稍微提前一点，确保目标项在视图中）
+                        scroll_position = max(0, offset * item_height - 100)  # 提前100px
+                        
+                        # 使用JavaScript滚动到目标位置
+                        scroll_js = f"""
+                            (() => {{
+                                // 尝试多个选择器找到滚动容器
+                                const selectors = [
+                                    '#pane-side',
+                                    '[aria-label="聊天列表"]',
+                                    '[role="grid"]'
+                                ];
+                                
+                                for (const selector of selectors) {{
+                                    const container = document.querySelector(selector);
+                                    if (container && container.scrollHeight > container.clientHeight) {{
+                                        container.scrollTop = {scroll_position};
+                                        return true;
+                                    }}
+                                }}
+                                return false;
+                            }})();
+                        """
+                        
+                        scroll_result = await self.page.evaluate(scroll_js)
+                        if scroll_result:
+                            await self.page.wait_for_timeout(random.randint(300, 500))
+                            logger.info(f"Scrolled using JavaScript to position {scroll_position}px (offset={offset})")
+                        else:
+                            logger.warning("Could not find scrollable container for JavaScript scroll")
+                            
+                    except Exception as js_error:
+                        logger.warning(f"JavaScript scroll also failed: {js_error}")
+            
+            # 获取指定范围的联系人
+            contacts = []
+            for i in range(offset, end_index):
+                try:
+                    item = chat_list_items.nth(i)
+                    
+                    # 确保元素在视图中，如果不在则滚动
+                    try:
+                        await item.scroll_into_view_if_needed()
+                        await self.page.wait_for_timeout(random.randint(50, 100))
+                    except:
+                        pass
+                    
+                    # 获取联系人名称
+                    contact_name = None
+                    try:
+                        name_element = item.locator('span[dir="auto"]').first
+                        if await name_element.count() > 0:
+                            contact_name = await name_element.text_content()
+                            contact_name = contact_name.strip() if contact_name else None
+                    except:
+                        pass
+                    
+                    # 如果无法获取名称，尝试其他方式
+                    if not contact_name:
+                        try:
+                            # 尝试从 title 属性获取
+                            title = await item.get_attribute('title')
+                            if title:
+                                contact_name = title.strip()
+                        except:
+                            pass
+                    
+                    # 如果仍然没有名称，跳过
+                    if not contact_name:
+                        logger.debug(f"Could not extract contact name for item {i}")
+                        continue
+                    
+                    # 获取最后一条消息预览
+                    message_preview = ""
+                    try:
+                        preview_elements = await item.locator('.selectable-text.copyable-text, [data-testid="conversation-info"]').all()
+                        if preview_elements:
+                            preview_text = await preview_elements[0].text_content()
+                            if preview_text:
+                                message_preview = preview_text.strip()
+                    except:
+                        pass
+                    
+                    # 检查是否有未读消息
+                    unread_count = 0
+                    try:
+                        unread_badge = item.locator('[aria-label*="未读"], [aria-label*="unread"]').first
+                        if await unread_badge.count() > 0:
+                            aria_label = await unread_badge.get_attribute('aria-label')
+                            if aria_label:
+                                count_match = re.search(r'(\d+)', aria_label)
+                                if count_match:
+                                    unread_count = int(count_match.group(1))
+                    except:
+                        pass
+                    
+                    # 检查是否静音
+                    is_muted = False
+                    try:
+                        muted_indicator = item.locator('[aria-label*="静音"], [aria-label*="muted"]').first
+                        if await muted_indicator.count() > 0:
+                            is_muted = True
+                    except:
+                        pass
+                    
+                    # 获取电话号码
+                    phone_number = None
+                    try:
+                        # 方法1: 从联系人项的 data-id 属性中提取（格式：{phone}@c.us 或 {phone}@g.us）
+                        data_id = await item.get_attribute('data-id')
+                        if data_id:
+                            # 提取电话号码（移除 @c.us 或 @g.us 后缀）
+                            phone_match = re.match(r'^(\d+)@[cg]\.us$', data_id)
+                            if phone_match:
+                                phone_number = phone_match.group(1)
+                                logger.debug(f"Extracted phone number from data-id: {phone_number}")
+                        
+                        # 方法2: 如果方法1失败，尝试从子元素的 data-id 中提取
+                        if not phone_number:
+                            try:
+                                # 查找包含 data-id 的子元素
+                                child_elements = await item.locator('[data-id]').all()
+                                for child in child_elements:
+                                    child_data_id = await child.get_attribute('data-id')
+                                    if child_data_id:
+                                        phone_match = re.match(r'^(\d+)@[cg]\.us$', child_data_id)
+                                        if phone_match:
+                                            phone_number = phone_match.group(1)
+                                            logger.debug(f"Extracted phone number from child data-id: {phone_number}")
+                                            break
+                            except:
+                                pass
+                        
+                        # 方法3: 如果联系人的名称本身就是电话号码格式，从名称中提取
+                        if not phone_number and contact_name:
+                            # 移除常见的电话号码格式字符（空格、连字符、括号等）
+                            cleaned_name = re.sub(r'[\s\-\(\)]', '', contact_name)
+                            # 检查是否是纯数字（至少7位，最多15位，符合国际电话号码格式）
+                            if re.match(r'^\+?\d{7,15}$', cleaned_name):
+                                phone_number = cleaned_name.lstrip('+')
+                                logger.debug(f"Extracted phone number from contact name: {phone_number}")
+                    except Exception as e:
+                        logger.debug(f"Error extracting phone number for item {i}: {e}")
+                    
+                    # 获取联系人元素引用，方便后续直接点击切换到聊天界面
+                    contact_element = None
+                    try:
+                        contact_element = await item.element_handle()
+                    except Exception as e:
+                        logger.debug(f"Error getting element handle for contact at index {i}: {e}")
+                    
+                    contact_info = {
+                        "contact_name": contact_name,
+                        "phone_number": phone_number,
+                        "message_preview": message_preview,
+                        "unread_count": unread_count,
+                        "is_muted": is_muted,
+                        "index": i,
+                        "element": contact_element  # 保存元素引用，方便后续直接点击
+                    }
+                    
+                    contacts.append(contact_info)
+                    
+                except Exception as e:
+                    logger.warning(f"Error extracting contact info at index {i}: {e}")
+                    continue
+            
+            # 如果启用从当前聊天或详情页获取电话号码，对于没有电话号码的联系人，尝试获取
+            for contact in contacts:
+                if not contact.get("phone_number"):
+                    try:
+                        # 打开该联系人的聊天
+                        contact_name = contact.get("contact_name")
+                        contact_element = contact.get("element")
+                        
+                        if contact_name:
+                            logger.info(f"Attempting to get phone number for: {contact_name}")
+                            
+                            # 优先使用保存的元素引用直接点击，如果失败则回退到查找方法
+                            chat_opened = False
+                            if contact_element:
+                                try:
+                                    # 检查元素是否仍然有效
+                                    try:
+                                        await contact_element.is_visible(timeout=1000)
+                                    except:
+                                        # 元素可能已失效，需要重新查找
+                                        contact_element = None
+                                        logger.debug(f"Contact element for {contact_name} is no longer valid, will use search method")
+                                    
+                                    if contact_element:
+                                        # 使用保存的元素引用直接点击
+                                        await contact_element.scroll_into_view_if_needed()
+                                        await self.page.wait_for_timeout(random.randint(100, 200))
+                                        await contact_element.click()
+                                        await self.page.wait_for_timeout(random.randint(500, 1000))  # 等待聊天加载
+                                        
+                                        # 验证是否成功打开聊天
+                                        current_contact = await self._get_current_chat_contact_name()
+                                        if current_contact and self._is_contact_match(current_contact, contact_name):
+                                            chat_opened = True
+                                            logger.debug(f"Successfully opened chat for {contact_name} using saved element reference")
+                                        else:
+                                            logger.debug(f"Failed to open chat using element reference, will try search method")
+                                except Exception as e:
+                                    logger.debug(f"Error clicking contact element for {contact_name}: {e}, will try search method")
+                            
+                            # 如果使用元素引用失败，回退到原来的查找方法
+                            if not chat_opened:
+                                active_result = await self.get_target_contact_chat_active(contact_name)
+                                chat_opened = active_result.get("success")
+                                if not chat_opened:
+                                    logger.warning(f"Failed to open chat for {contact_name}: {active_result.get('error')}")
+                            
+                            if chat_opened:
+                                phone_number = await self._get_phone_number_from_chat_messages()
+                                
+                                if phone_number:
+                                    contact["phone_number"] = phone_number
+                                    logger.info(f"Successfully got phone number: {phone_number}")
+                                else:
+                                    logger.warning(f"Could not extract phone number for {contact_name}")
+                                
+                                # 返回到聊天列表
+                                # 在桌面版 WhatsApp Web 中，侧边栏通常一直显示，但我们需要确保能看到聊天列表
+                                # 尝试点击侧边栏区域或等待页面稳定
+                                try:
+                                    # 检查是否在聊天列表页面（通过检查 #pane-side 是否存在）
+                                    await self.page.wait_for_selector('#pane-side', timeout=2000)
+                                    # 如果侧边栏存在，点击一下确保焦点在列表上
+                                    side_panel = await self.page.wait_for_selector('#pane-side', timeout=1000)
+                                    if side_panel:
+                                        await side_panel.click(button='left', click_count=1, delay=random.randint(50, 100))
+                                        await self.page.wait_for_timeout(random.randint(200, 400))
+                                except:
+                                    # 如果侧边栏不可见，可能需要关闭聊天视图
+                                    # 在桌面版中，通常侧边栏会一直显示，所以这里主要是等待
+                                    await self.page.wait_for_timeout(random.randint(300, 500))
+                    except Exception as e:
+                        logger.warning(f"Error getting phone number for {contact.get('contact_name')}: {e}")
+                        continue
+            
+            # 清理 contacts 中的 element 字段，避免 JSON 序列化问题
+            for contact in contacts:
+                if "element" in contact:
+                    del contact["element"]
+        
+            result["contacts"] = contacts
+            logger.info(f"Successfully retrieved {len(contacts)} contacts (offset={offset}, limit={limit})")
+            
+        except Exception as e:
+            logger.error(f"Error getting contacts list: {e}")
+        
+        return result
         
     async def get_chat_messages(self) -> List[MessageItem]:
         """
@@ -896,6 +1309,70 @@ class WhatsAppBrowserClient:
             result["error"] = error_msg
             logger.error(error_msg)
             return result
+
+    async def _get_phone_number_from_chat_messages(self) -> Optional[str]:
+        """
+        从当前聊天页面的消息元素中获取电话号码。
+        通过查找消息元素的 data-id 属性来提取电话号码。
+        data-id 格式示例: "false_33637723195@c.us_3A9F53B9DF1E162BD003"
+        
+        Returns:
+            电话号码字符串（如果找到），否则返回 None
+        """
+        try:
+            # 确保在聊天页面
+            await self.page.wait_for_selector('#main', timeout=3000)
+            
+            # 等待消息加载
+            await self.page.wait_for_timeout(random.randint(500, 800))
+            
+            # 查找消息容器元素，从它们的 data-id 属性中提取电话号码
+            # 根据HTML结构，消息的 data-id 在 #main [role="row"] 下的 div 元素上
+            # 格式: "false_33637723195@c.us_3A9F53B9DF1E162BD003"
+            message_data_id_selectors = [
+                '#main [role="row"] > div[data-id]',  # 直接子元素
+                '#main [role="row"] [data-id]',  # 所有子元素
+            ]
+            
+            phone_number = None
+            
+            for selector in message_data_id_selectors:
+                try:
+                    # 查找所有包含 data-id 的消息元素
+                    data_id_elements = await self.page.query_selector_all(selector)
+                    
+                    for element in data_id_elements:
+                        try:
+                            data_id = await element.get_attribute('data-id')
+                            if data_id:
+                                # data-id 格式: "false_33637723195@c.us_3A9F53B9DF1E162BD003"
+                                # 提取电话号码部分: {phone}@c.us 或 {phone}@g.us
+                                phone_match = re.search(r'(\d+)@[cg]\.us', data_id)
+                                if phone_match:
+                                    phone_number = phone_match.group(1)
+                                    logger.debug(f"Extracted phone number from message data-id: {phone_number} (data-id: {data_id})")
+                                    break
+                        except Exception as e:
+                            logger.debug(f"Error extracting data-id from element: {e}")
+                            continue
+                    
+                    if phone_number:
+                        break
+                except Exception as e:
+                    logger.debug(f"Error querying selector {selector}: {e}")
+                    continue
+            
+            if phone_number:
+                logger.info(f"Successfully extracted phone number from chat messages: {phone_number}")
+            else:
+                logger.warning("Could not extract phone number from chat messages")
+            
+            return phone_number
+            
+        except Exception as e:
+            logger.error(f"Error getting phone number from chat messages: {e}")
+            return None
+
 
     async def _get_current_chat_contact_name(self) -> Optional[str]:
         """
@@ -1797,7 +2274,7 @@ class WhatsAppMonitor:
         async with self._task_lock:
             for task_name, task in self.tasks.items():
                 if not task.enabled:
-                    logger.debug(f"Skipping disabled task: {task_name}")
+                    # logger.debug(f"Skipping disabled task: {task_name}")
                     continue
                     
                 try:

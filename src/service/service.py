@@ -40,6 +40,7 @@ from schema import (
     StreamInput,
     UserInput,
     WhatsAppContactInput,
+    WhatsAppContactsListInput,
     WhatsAppMessageInput,
 )
 from service.utils import (
@@ -127,8 +128,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 agent.checkpointer = saver
             
             # 启动浏览器服务（常驻浏览器）
-            from client.whatsapp_client import global_whatsapp_client
-            await global_whatsapp_client.start()
+            from service.browser_service import browser_service
+            await browser_service.start()
             
             yield
     except Exception as e:
@@ -137,8 +138,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     finally:
         # 停止浏览器服务
         try:
-            from client.whatsapp_client import global_whatsapp_client
-            await global_whatsapp_client.stop()
+            from service.browser_service import browser_service
+            await browser_service.stop()
             logging.info("浏览器服务已停止")
         except Exception as e:
             logging.error(f"Error stopping browser service: {e}")
@@ -473,7 +474,11 @@ async def reset_performance_metrics():
 @app.get("/whatsapp/unread_messages")
 async def whatsapp_unread_messages():
     """WhatsApp unread messages endpoint."""
-    return await whatsapp.get_unread_messages()
+    from service.browser_service import get_whatsapp_client
+    whatsapp_client = await get_whatsapp_client()
+    if not whatsapp_client:
+        raise HTTPException(status_code=400, detail="WhatsApp 客户端未启动")
+    return await whatsapp_client.get_unread_messages()
 
 # curl -s http://localhost:8080/whatsapp/unread_messages
 # [{"contact_name":"f.matheoprod@gmail.com","unread_count":"2","message_preview_container":"default-contact-refreshedf.matheoprod@gmail.com00:17?2","is_muted":false},{"contact_name":"+33 7 75 81 26 36","unread_count":"1","message_preview_container":"+33 7 75 81 26 36昨天Arturmakhmoudov58@gmail.com1","is_muted":false}]# 
@@ -485,14 +490,37 @@ async def whatsapp_unread_messages():
 async def whatsapp_contact_chat_list(request: WhatsAppContactInput):
     """WhatsApp contact chat list endpoint."""
     logging.info(f"WhatsApp contact chat list endpoint: {request.contact_name}")
-    return await whatsapp.get_contact_chat_list(request.contact_name)
+    from service.browser_service import get_whatsapp_client
+    whatsapp_client = await get_whatsapp_client()
+    if not whatsapp_client:
+        raise HTTPException(status_code=400, detail="WhatsApp 客户端未启动")
+    return await whatsapp_client.get_contact_chat_list(request.contact_name)
+
+# curl -X POST http://localhost:8080/whatsapp/contacts_list -H "Content-Type: application/json" -d '{"offset": 0, "limit": 5}'
+# curl -X POST http://localhost:8080/whatsapp/contacts_list -H "Content-Type: application/json" -d '{"offset": 5, "limit": 3}'
+@app.post("/whatsapp/contacts_list")
+async def whatsapp_contacts_list(request: WhatsAppContactsListInput):
+    """WhatsApp contacts list endpoint with pagination."""
+    logging.info(f"WhatsApp contacts list endpoint: offset={request.offset}, limit={request.limit}")
+    from service.browser_service import get_whatsapp_client
+    whatsapp_client = await get_whatsapp_client()
+    if not whatsapp_client:
+        raise HTTPException(status_code=400, detail="WhatsApp 客户端未启动")
+    return await whatsapp_client.get_contacts_list(
+        offset=request.offset,
+        limit=request.limit
+    )
 
 # curl -X POST http://localhost:8080/whatsapp/send_message -H "Content-Type: application/json" -d '{"contact_name": "f.matheoprod@gmail.com", "message": "❤️❤️"}'
 # curl -X POST http://localhost:8080/whatsapp/send_message -H "Content-Type: application/json" -d '{"contact_name": "+33 7 75 81 26 36", "message": "let me know when u done the transfer bro, ill top up for u"}'
 @app.post("/whatsapp/send_message")
 async def whatsapp_send_message(request: WhatsAppMessageInput):
     """WhatsApp send message endpoint."""
-    return await whatsapp.send_message_to_contact(request.contact_name, request.message)
+    from service.browser_service import get_whatsapp_client
+    whatsapp_client = await get_whatsapp_client()
+    if not whatsapp_client:
+        raise HTTPException(status_code=400, detail="WhatsApp 客户端未启动")
+    return await whatsapp_client.send_message_to_contact(request.contact_name, request.message)
 
 # curl -s http://localhost:8080/test
 # @app.get("/test")
@@ -677,7 +705,7 @@ async def control_whatsapp_task(request: TaskControlInput):
     ```
     """
     try:
-        from client.whatsapp_client import global_whatsapp_client
+        from service.browser_service import get_whatsapp_client
         
         # 验证操作类型
         if request.action not in ["enable", "disable"]:
@@ -686,8 +714,16 @@ async def control_whatsapp_task(request: TaskControlInput):
                 detail="action 参数必须是 'enable' 或 'disable'"
             )
         
+        # 获取WhatsApp客户端
+        whatsapp_client = await get_whatsapp_client()
+        if not whatsapp_client:
+            raise HTTPException(
+                status_code=400,
+                detail="WhatsApp 客户端未启动，请先启动 WhatsApp 服务"
+            )
+        
         # 获取监控器
-        monitor = global_whatsapp_client.monitor
+        monitor = whatsapp_client.monitor
         if not monitor:
             raise HTTPException(
                 status_code=400, 
@@ -738,17 +774,18 @@ async def take_new_screenshot():
     ```
     """
     try:
-        from client.whatsapp_client import global_whatsapp_client
+        from service.browser_service import get_whatsapp_client
         
-        # 检查WhatsApp客户端是否启动
-        if not global_whatsapp_client or not global_whatsapp_client.page:
+        # 获取WhatsApp客户端
+        whatsapp_client = await get_whatsapp_client()
+        if not whatsapp_client or not whatsapp_client.page:
             raise HTTPException(
                 status_code=400,
                 detail="WhatsApp 客户端未启动，请先启动 WhatsApp 服务"
             )
         
         # 拍摄新截图
-        screenshot_path = await global_whatsapp_client.take_screenshot("api_request")
+        screenshot_path = await whatsapp_client.take_screenshot("api_request")
         filename = os.path.basename(screenshot_path)
         
         # 读取图片文件并转换为base64

@@ -8,7 +8,7 @@ docker compose -f compose.yaml down
 docker rm -f agent-service-dev-agent agent-service-dev-streamlit 2>/dev/null || true
 
 echo "启动开发环境..."
-docker compose up -d
+docker compose up -d --build
 
 echo "✅ 开发环境已启动"
 echo "📊 Agent Service: http://localhost:8080"

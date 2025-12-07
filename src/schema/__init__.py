@@ -10,6 +10,7 @@ from schema.schema import (
     StreamInput,
     UserInput,
     WhatsAppContactInput,
+    WhatsAppContactsListInput,
     WhatsAppMessageInput,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "ChatHistoryInput",
     "ChatHistory",
     "WhatsAppContactInput",
+    "WhatsAppContactsListInput",
     "WhatsAppMessageInput",
 ]

@@ -179,6 +179,24 @@ class WhatsAppContactInput(BaseModel):
     )
 
 
+class WhatsAppContactsListInput(BaseModel):
+    """Input for WhatsApp contacts list pagination."""
+
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="起始位置（从0开始）",
+        examples=[0, 5, 10],
+    )
+    limit: int = Field(
+        default=5,
+        ge=1,
+        le=5,
+        description="获取的联系人数量（1-5之间）",
+        examples=[1, 3, 5],
+    )
+
+
 class WhatsAppMessageInput(BaseModel):
     """Input for sending WhatsApp messages."""
 

@@ -1,0 +1,48 @@
+{
+    "contacts": [
+        {
+            "contact_name": "+33 7 64 72 08 50",
+            "phone_number": "33764720850",
+            "message_preview": "",
+            "unread_count": 2,
+            "is_muted": false,
+            "index": 0
+        },
+        {
+            "contact_name": "+33 7 49 95 31 81",
+            "phone_number": "33749953181",
+            "message_preview": "",
+            "unread_count": 2,
+            "is_muted": false,
+            "index": 1
+        },
+        {
+            "contact_name": "+33 7 87 24 17 50",
+            "phone_number": "33787241750",
+            "message_preview": "",
+            "unread_count": 1,
+            "is_muted": false,
+            "index": 2
+        },
+        {
+            "contact_name": "maeva.danel.1@gmail.com",
+            "phone_number": null,
+            "message_preview": "",
+            "unread_count": 0,
+            "is_muted": false,
+            "index": 3
+        },
+        {
+            "contact_name": "+33 6 65 94 30 51",
+            "phone_number": "33665943051",
+            "message_preview": "",
+            "unread_count": 1,
+            "is_muted": false,
+            "index": 4
+        }
+    ],
+    "total_count": 21,
+    "offset": 0,
+    "limit": 5,
+    "has_more": true
+}
